@@ -110,9 +110,8 @@ class ArenaService:
             meta = await self.store.official_portfolio(self.season_id, tag)
             if meta is None:
                 log.warning("ARENA_TEAM_TOKENS: no official team %r", tag)
-            elif not await self.store.token_exists(self.hash_token(raw)):
-                await self.store.add_token(meta.id, raw[:8], self.hash_token(raw))
-                log.info("registered pre-shared token for %s", meta.name)
+            elif await self.store.assign_token(meta.id, raw[:8], self.hash_token(raw)):
+                log.info("pre-shared token now drives %s (season %s)", meta.name, self.season["slug"])
         self.last_seen = await self.store.last_seen(self.season_id)
         self.bots = HouseBots(teams, self.settings.resolved_benchmark(), self.settings.resolved_dividend_symbols())
         for pid in self.meta:
@@ -154,7 +153,10 @@ class ArenaService:
             self.feed = ReplayFeed.from_jsonl(Path(s.replay_path), speed=s.demo_speed)
         elif s.market_feed == "redis":
             import redis.asyncio as aioredis
-            self.feed = RedisStreamFeed(aioredis.from_url(s.redis_url), stream=s.market_stream)
+            # The feed blocks up to 5s per XREAD; the socket timeout must comfortably exceed that.
+            client = aioredis.from_url(s.redis_url, socket_timeout=30, socket_connect_timeout=10,
+                                       health_check_interval=30)
+            self.feed = RedisStreamFeed(client, stream=s.market_stream, block_ms=5000)
         else:
             self.feed = None
         if self.feed is not None:

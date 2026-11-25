@@ -248,6 +248,23 @@ async def test_pre_shared_team_token_hands_team_to_external_driver(dsn):
     await service2.stop()
     await pool2.close()
 
+    # a new season (e.g. demo -> live): the same pre-shared token now drives that season's team
+    st3 = dataclasses.replace(st, season_slug="test-live")
+    pool3 = await create_pool(dsn)
+    service3 = ArenaService(st3, pool3)
+    await service3.start()
+    app3 = create_app(st3)
+    app3.state.service = service3
+    client3 = httpx.AsyncClient(transport=httpx.ASGITransport(app=app3), base_url="http://arena")
+    hb = await client3.post("/api/v1/agent/heartbeat", headers={"Authorization": f"Bearer {token}"})
+    assert hb.status_code == 200, hb.text
+    new_macro = next(r for r in (await client3.get("/api/v1/leaderboard")).json()["rows"]
+                     if r["name"] == "OpenPup 宏观辩论团")
+    assert new_macro["portfolio_id"] != macro["portfolio_id"] and new_macro["driver"]["online"] is True
+    await client3.aclose()
+    await service3.stop()
+    await pool3.close()
+
 
 @pytest.mark.anyio
 async def test_open_orders_survive_a_restart_within_the_session(dsn):

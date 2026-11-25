@@ -94,6 +94,18 @@ class Store:
         return None if r is None else PortfolioMeta(str(r["id"]), r["name"], r["controller_type"], r["is_official"],
                                                     r["is_benchmark"], r["persona_tag"], r["brief"], r["created_at"])
 
+    async def assign_token(self, portfolio_id: str, token_prefix: str, token_hash: bytes) -> bool:
+        """Point an operator's pre-shared token at `portfolio_id` (e.g. the same team in a new season).
+        Returns True when the token was created or moved."""
+        old = await self.pool.fetchval("SELECT portfolio_id FROM api_tokens WHERE token_hash = $1", token_hash)
+        if old is not None and str(old) == portfolio_id:
+            return False
+        await self.pool.execute(
+            "INSERT INTO api_tokens (portfolio_id, token_prefix, token_hash) VALUES ($1, $2, $3) "
+            "ON CONFLICT (token_hash) DO UPDATE SET portfolio_id = EXCLUDED.portfolio_id, revoked_at = NULL",
+            uuid.UUID(portfolio_id), token_prefix, token_hash)
+        return True
+
     async def add_token(self, portfolio_id: str, token_prefix: str, token_hash: bytes) -> None:
         await self.pool.execute(
             "INSERT INTO api_tokens (portfolio_id, token_prefix, token_hash) VALUES ($1, $2, $3)",

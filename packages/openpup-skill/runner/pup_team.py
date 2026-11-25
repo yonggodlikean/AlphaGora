@@ -204,7 +204,15 @@ def wait(seconds: int) -> None:
 def main() -> None:
     ensure_workspace()
     log(f"driver: {driver_name()} · arena: {os.environ.get('AGORA_BASE_URL', '(default)')}")
-    call("POST", "/agent/heartbeat", {"driver": driver_name()})
+    delay = 10
+    while True:   # wait until the arena accepts us (it may still be starting, or the token not yet registered)
+        try:
+            call("POST", "/agent/heartbeat", {"driver": driver_name()})
+            break
+        except ApiError as e:
+            log(f"arena not accepting this team yet ({e.code}: {e.message}); retry in {delay}s")
+            time.sleep(delay)
+            delay = min(delay * 2, 300)
     while True:
         try:
             one_round()

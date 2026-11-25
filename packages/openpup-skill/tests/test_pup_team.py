@@ -18,11 +18,30 @@ SYMS = [
 ]
 
 
-def test_candidates_are_biggest_movers_and_skip_etfs_and_cooldown():
+MOVERS = sorted(SYMS, key=lambda s: -abs(s["chg_pct"]))        # the arena returns them sorted
+TREND = [{"symbol": "998007.SZ", "name": "演示消费", "chg_pct": 1.0, "suspended": False, "ret20": 0.2}]
+
+
+def test_candidates_review_holdings_then_mix_movers_and_trend(monkeypatch):
     pup_team._last_debated.clear()
-    assert [s["symbol"] for s in pup_team.pick_candidates(STATE, SYMS)] == ["999001.SH", "998006.SZ"]
-    pup_team._last_debated["999001.SH"] = pup_team.time.time()
-    assert [s["symbol"] for s in pup_team.pick_candidates(STATE, SYMS)][0] == "998006.SZ"
+    monkeypatch.setattr(pup_team, "MAX_CANDIDATES", 3)
+    picks = pup_team.pick_candidates(STATE, MOVERS, TREND)
+    # the held bank is due for review; then the biggest non-ETF mover, then the strongest trend
+    assert [(s["symbol"], s["why"]) for s in picks] == [
+        ("999002.SH", "持仓复盘"), ("999001.SH", "今日异动"), ("998007.SZ", "趋势最强")]
+    now = pup_team.time.time()
+    pup_team._last_debated.update({"999002.SH": now, "999001.SH": now})
+    picks = pup_team.pick_candidates(STATE, MOVERS, TREND)
+    assert [s["symbol"] for s in picks] == ["998006.SZ", "998007.SZ"]      # cooldown and fresh review respected
+
+
+def test_context_lines():
+    f = {"ret5": 0.02, "ret20": 0.1, "ret60": -0.05, "ma20": 10.0, "ma60": 13.0, "rsi2": 12.3, "vol60": 0.3,
+         "div_yield": 0.0, "_last": 11.0}
+    text = pup_team.stock_context(f)
+    assert "20 日 +10.0%" in text and "20 日线上方" in text and "60 日线下方" in text and "RSI(2) 12" in text
+    br = {"up": 3000, "down": 1800, "limit_up": 60, "limit_down": 5, "indices": {"沪深300": {"chg_pct": 0.8}}}
+    assert "沪深300 +0.80%" in pup_team.market_context(br) and "涨停 60 家" in pup_team.market_context(br)
 
 
 def test_facts_use_the_fresh_book():

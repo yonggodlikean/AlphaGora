@@ -4,6 +4,10 @@
 //! into Agora snapshots and publishes them to a Redis Stream (`md:l1`, field `data` = JSON). Every published
 //! snapshot is also appended to a daily gzip JSONL tape that `ReplayFeed.from_jsonl` and the Nautilus bridge read.
 //!
+//! Once per trading day (08:30, or at start when Redis has none) it also builds the daily history the house
+//! teams trade on: ~250 forward-adjusted daily bars, dividends and free float per symbol (`md:hist`, see
+//! history.rs).
+//!
 //! The universe is index constituents (CSI files, refreshed daily) plus extra symbols. It is split into
 //! 60-code requests across `GATEWAY_CONNECTIONS` worker threads, each with its own TDX connection, so ~1,300
 //! symbols fit in a 3s cycle even from a server far from the TDX hosts.
@@ -22,6 +26,7 @@
 //!   TDX_SERVER            ip:port      (optional; pin every connection to one server)
 //!   FORCE_SESSION         1 to poll outside trading hours (debugging only; snapshots are still session-filtered)
 
+mod history;
 mod normalize;
 mod universe;
 
@@ -418,6 +423,19 @@ impl Sink {
     }
 }
 
+fn build_history(cfg: &Config) -> Result<()> {
+    let now = cst_now();
+    let u = universe::build_with_members(&cfg.indices, &cfg.extras, &cfg.csi_url, cfg.tape_dir.as_deref(),
+                                         &now.date_naive().to_string())?;
+    let metas = resolve_symbols(&mut connect(cfg.tdx_server)?, &u.symbols)?;
+    let servers = match cfg.tdx_server {
+        Some(a) => vec![a],
+        None => probe_servers(&STOCK_IP),
+    };
+    history::run(&cfg.redis_url, metas, u.members, &cfg.indices, servers, cfg.connections, now.date_naive(), now.time())?;
+    Ok(())
+}
+
 // ------------------------------------------------------------------ main loop
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -441,10 +459,29 @@ fn main() -> Result<()> {
     let mut last_heartbeat = Instant::now() - Duration::from_secs(60);
     let (mut published, mut worst) = (0u64, Duration::ZERO);
     let mut skips: HashMap<String, u64> = HashMap::new();
+    let mut hist_built = history::built_date(&cfg.redis_url);
+    let mut hist_job: Option<JoinHandle<()>> = None;
+    let mut hist_tried: Option<Instant> = None;
 
     loop {
         let now = cst_now();
         let date = now.date_naive();
+        // Daily history for the house teams: once per trading day from 08:30, or right away when there is none.
+        if hist_job.as_ref().is_some_and(|h| h.is_finished()) {
+            let _ = hist_job.take().map(|h| h.join());
+            hist_built = history::built_date(&cfg.redis_url);
+        }
+        let due = hist_built != Some(date) && (hist_built.is_none()
+            || (TradingCalendar::is_trading_day(&date) && now.time() >= NaiveTime::from_hms_opt(8, 30, 0).unwrap()));
+        if due && hist_job.is_none() && hist_tried.is_none_or(|t| t.elapsed() >= Duration::from_secs(600)) {
+            hist_tried = Some(Instant::now());
+            let cfg = cfg.clone();
+            hist_job = Some(thread::Builder::new().name("history".into()).spawn(move || {
+                if let Err(e) = build_history(&cfg) {
+                    error!("history: {e:#}; retrying in 10 minutes");
+                }
+            })?);
+        }
         if last_heartbeat.elapsed() >= Duration::from_secs(10) {
             sink.heartbeat(session_now(&cfg));
             last_heartbeat = Instant::now();

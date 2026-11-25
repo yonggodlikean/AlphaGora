@@ -236,7 +236,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/market/symbols", tags=["行情"], summary="股票列表：搜索、热门、涨跌幅榜")
     async def symbols(s: Svc, q: str = Query("", max_length=20),
-                      sort: Literal["hot", "gainers", "losers", "movers", "code"] = "hot",
+                      sort: Literal["hot", "gainers", "losers", "movers", "code", "trend"] = "hot",
                       limit: int = Query(30, ge=1, le=200), offset: int = Query(0, ge=0),
                       symbols: str = Query("", max_length=2000)):
         only = [x.strip() for x in symbols.split(",") if x.strip()][:200] or None
@@ -245,6 +245,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/market/snapshot", tags=["行情"], summary="五档盘口快照（逗号分隔，最多 60 只）")
     async def snapshot(s: Svc, symbols: str = Query(..., max_length=2000)):
         return {"snapshots": s.snapshot([x.strip() for x in symbols.split(",") if x.strip()][:60])}
+
+    @app.get("/api/v1/market/features", tags=["行情"], summary="个股日线指标：均线、涨幅、RSI(2)、波动率、股息率")
+    async def market_features(s: Svc, symbols: str = Query(..., max_length=2000)):
+        """以今天的实时价格作为最新一根 K 线计算；收盘后以今天收盘价计算。最多 60 只。"""
+        return {"features": s.symbol_features([x.strip() for x in symbols.split(",") if x.strip()][:60])}
+
+    @app.get("/api/v1/market/breadth", tags=["行情"], summary="市场情绪：涨跌家数、涨停跌停数、指数 ETF 涨跌")
+    async def market_breadth(s: Svc):
+        return s.breadth()
 
     @app.post("/api/v1/join", status_code=201, include_in_schema=False)
     async def join(s: Svc, body: JoinIn, request: Request):

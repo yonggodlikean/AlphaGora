@@ -28,6 +28,7 @@ PUP_HOME = os.path.expanduser(os.environ.get("OPENPUP_HOME", "~/.agora-openpup")
 INTERVAL = int(os.environ.get("AGORA_INTERVAL", "300"))        # seconds between rounds
 MAX_CANDIDATES = int(os.environ.get("AGORA_MAX_CANDIDATES", "2"))
 COOLDOWN = int(os.environ.get("AGORA_COOLDOWN", "1200"))        # seconds before the same symbol is debated again
+HOLD_REVIEW = int(os.environ.get("AGORA_HOLD_REVIEW", "1800"))  # each holding is re-debated at least this often
 MAX_POSITION_PCT = 15
 ROLES = [
     ("多头", "research", "你负责找买入或继续持有的理由。"),
@@ -84,7 +85,35 @@ def ask(pup: str, prompt: str, retries: int = 1) -> dict:
 
 
 # ------------------------------------------------------------------ facts
-def facts(sym: dict, book: dict, state: dict) -> str:
+def _p(x) -> str:
+    return "—" if x is None else f"{x * 100:+.1f}%"
+
+
+def market_context(breadth: dict | None) -> str:
+    if not breadth:
+        return ""
+    idx = "，".join(f"{k} {v['chg_pct']:+.2f}%" for k, v in breadth.get("indices", {}).items())
+    return (f"大盘：{idx or '指数暂无'}；全市场上涨 {breadth['up']} 家、下跌 {breadth['down']} 家，"
+            f"涨停 {breadth['limit_up']} 家、跌停 {breadth['limit_down']} 家。")
+
+
+def stock_context(f: dict | None) -> str:
+    if not f:
+        return ""
+    last = f.get("_last", 0)
+    side = lambda ma: "上方" if ma and last > ma else "下方"
+    parts = [f"5 日 {_p(f.get('ret5'))}、20 日 {_p(f.get('ret20'))}、60 日 {_p(f.get('ret60'))}",
+             f"在 20 日线{side(f.get('ma20'))}、60 日线{side(f.get('ma60'))}"]
+    if f.get("rsi2") is not None:
+        parts.append(f"RSI(2) {f['rsi2']:.0f}")
+    if f.get("vol60"):
+        parts.append(f"年化波动 {f['vol60'] * 100:.0f}%")
+    if f.get("div_yield"):
+        parts.append(f"股息率 {f['div_yield'] * 100:.1f}%")
+    return "日线：" + "；".join(parts) + "。"
+
+
+def facts(sym: dict, book: dict, state: dict, extra: str = "") -> str:
     pos = next((p for p in state["positions"] if p["symbol"] == sym["symbol"]), None)
     asks = " ".join(f"{p}×{v // 100}手" for p, v in book["asks"][:3]) or "空（涨停封板）"
     bids = " ".join(f"{p}×{v // 100}手" for p, v in book["bids"][:3]) or "空（跌停封板）"
@@ -95,20 +124,37 @@ def facts(sym: dict, book: dict, state: dict) -> str:
     return (f"股票：{book['name']}（{book['symbol']}），现价 {book['last_price']}，今日 {chg:+.2f}%，"
             f"昨收 {book['prev_close']}，涨停 {book['upper_limit']}，跌停 {book['lower_limit']}。"
             f"卖盘：{asks}。买盘：{bids}。我们的账户：总资产 {state['total_equity']}，可用现金 {state['available_cash']}，"
-            f"这只股票{held}。")
+            f"这只股票{held}。{extra}")
 
 
-def pick_candidates(state: dict, symbols: list[dict]) -> list[dict]:
+def pick_candidates(state: dict, movers: list[dict], trend: list[dict]) -> list[dict]:
+    """Holdings due for review first (oldest review first), then alternately the day's biggest mover and the
+    strongest trend, so the debate has both news and a thesis. The number of debates per round stays the same."""
     now = time.time()
-    fresh = [s for s in symbols if "ETF" not in s["name"] and not s["suspended"]
-             and now - _last_debated.get(s["symbol"], 0) > COOLDOWN]
-    # The biggest movers of the day make the best debates, held or not (a held one may be sold).
-    return sorted(fresh, key=lambda s: -abs(s["chg_pct"]))[:MAX_CANDIDATES]
+    held = {p["symbol"] for p in state["positions"] if p["qty"] > 0}
+    picks: list[dict] = []
+    due = sorted((p for p in state["positions"] if p["qty"] > 0
+                  and now - _last_debated.get(p["symbol"], 0) > HOLD_REVIEW),
+                 key=lambda p: _last_debated.get(p["symbol"], 0))
+    picks += [{"symbol": p["symbol"], "name": p["symbol"], "why": "持仓复盘"} for p in due[:MAX_CANDIDATES]]
+    fresh = lambda s: ("ETF" not in s["name"] and not s["suspended"] and s["symbol"] not in held
+                       and now - _last_debated.get(s["symbol"], 0) > COOLDOWN
+                       and all(s["symbol"] != x["symbol"] for x in picks))
+    pools = [[s | {"why": "今日异动"} for s in movers if fresh(s)], [s | {"why": "趋势最强"} for s in trend if fresh(s)]]
+    i = 0
+    while len(picks) < MAX_CANDIDATES and any(pools):
+        pool = pools[i % 2]
+        while pool and not fresh(pool[0]):
+            pool.pop(0)
+        if pool:
+            picks.append(pool.pop(0))
+        i += 1
+    return picks[:MAX_CANDIDATES]
 
 
 # ------------------------------------------------------------------ one debate
-def debate(persona: str, sym: dict, book: dict, state: dict) -> None:
-    context = facts(sym, book, state)
+def debate(persona: str, sym: dict, book: dict, state: dict, extra: str = "") -> None:
+    context = facts(sym, book, state, extra)
     rounds: list[dict] = []
     for role, pup, duty in ROLES:
         said = "\n".join(f"{r['role']}（{r['stance']}）：{r['argument']}" for r in rounds) or "（你第一个发言）"
@@ -158,18 +204,36 @@ def debate(persona: str, sym: dict, book: dict, state: dict) -> None:
         log("  → 不下单")
 
 
+def optional(fn):
+    """Market context is a bonus: an older arena without these endpoints must not stop the team."""
+    try:
+        return fn()
+    except (ApiError, KeyError, ValueError):
+        return None
+
+
 def one_round() -> None:
     state = call("GET", "/agent/state")
     if not state["market"]["trading"]:
         log(f"休市（{state['market']['clock']}），等待")
         return
-    symbols = call("GET", "/market/symbols?sort=movers&limit=60", auth=False)["symbols"]
-    for sym in pick_candidates(state, symbols):
+    movers = call("GET", "/market/symbols?sort=movers&limit=60", auth=False)["symbols"]
+    trend = optional(lambda: call("GET", "/market/symbols?sort=trend&limit=60", auth=False)["symbols"]) or []
+    breadth = optional(lambda: call("GET", "/market/breadth", auth=False))
+    for sym in pick_candidates(state, movers, trend):
         _last_debated[sym["symbol"]] = time.time()
-        book = call("GET", f"/market/snapshot?symbols={sym['symbol']}", auth=False)["snapshots"][0]
-        log(f"辩论 {book['name']} {book['last_price']}")
+        snaps = call("GET", f"/market/snapshot?symbols={sym['symbol']}", auth=False)["snapshots"]
+        if not snaps:
+            continue
+        book = snaps[0]
+        feats = (optional(lambda: call("GET", f"/market/features?symbols={sym['symbol']}", auth=False)["features"])
+                 or {}).get(sym["symbol"])
+        if feats:
+            feats["_last"] = float(book["last_price"])
+        extra = f"入选原因：{sym['why']}。" + market_context(breadth) + stock_context(feats)
+        log(f"辩论 {book['name']} {book['last_price']}（{sym['why']}）")
         try:
-            debate(state["portfolio_name"], sym, book, state)
+            debate(state["portfolio_name"], sym, book, state, extra)
         except ApiError as e:
             log(f"  擂台拒绝：{e.code} {e.message}")
         except (RuntimeError, ValueError) as e:

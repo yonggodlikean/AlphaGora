@@ -31,7 +31,8 @@ from .domain.enums import ControllerType, Liquidity, OrderStatus, OrderType, Rej
 from .domain.errors import ArenaError, MarketDataError, OrderRejected, PublicError
 from .domain.events import ArenaEvent
 from .domain.models import Fill, Order, OrderRequest, Position
-from .house_bots import HouseBots, Intent, MarketView
+from .house_bots import HouseBots, Intent, MarketView, is_stock as is_stock_symbol
+from .market.history import History, features as hist_features
 from .market.calendar import CST, TradingCalendar
 from .market.demo import DemoFeed, EndOfDay
 from .market.feed import RedisStreamFeed, ReplayFeed, snapshot_from_dict, snapshot_to_dict
@@ -78,6 +79,9 @@ class ArenaService:
         self._names_pending: dict[str, str] = {}
         self.market_now: datetime | None = None
         self.day_open_px: dict[str, Decimal] = {}
+        self.daily: History | None = None          # daily bars for the strategies (gateway, or synthetic in demo)
+        self._history_built: str | None = None
+        self.held_days: dict[tuple[str, str], int] = {}
         self.minute_closes: dict[str, list[Decimal]] = {}
         self._minute_of: dict[str, tuple[int, int]] = {}
         self.recent_fills: deque = deque(maxlen=1000)
@@ -143,8 +147,10 @@ class ArenaService:
         for pid in self.meta:
             if await self.store.has_badge(pid, "first_trade"):
                 self._first_trade_done.add(pid)
+        await self.refresh_held_days()
         if self.settings.auto_start_feed:
             await self.start_feed()
+            await self.refresh_history()
             self._tasks.append(asyncio.create_task(self._run_housekeeping(), name="housekeeping"))
 
     async def _load_portfolios(self) -> None:
@@ -325,6 +331,7 @@ class ArenaService:
         self.minute_closes.clear()
         self._minute_of.clear()
         self._last_bot_minute = None
+        await self.refresh_held_days(d)
         positions = [(pid, p) for pid, a in self.engine.accounts.items() for p in a.positions.values()]
         await self._handle([], events, extra_positions=positions)
         log.info("market open %s", d)
@@ -362,6 +369,7 @@ class ArenaService:
             try:
                 await self.refresh_controls()
                 await self.check_health()
+                await self.refresh_history()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -509,6 +517,99 @@ class ArenaService:
             log.info("loaded %d closing prices from %s", len(snaps), max(s.ts for s in snaps).date())
         return len(snaps)
 
+    # ================================================================== daily history
+    async def refresh_history(self) -> None:
+        """Live: reload the gateway's daily history when it has built a new one (checked every 30s)."""
+        if self.settings.market_feed != "redis" or self._redis is None:
+            return
+        try:
+            raw = await self._redis.get("md:hist:meta")
+            if not raw:
+                return
+            built = json.loads(raw).get("built_at")
+            if built == self._history_built:
+                return
+            h = await History.from_redis(self._redis)
+            self.daily, self._history_built = h, built
+            log.info("daily history %s: %d symbols", h.built, len(h.bars))
+        except Exception:
+            log.exception("could not load daily history")
+
+    def _ensure_synthetic_history(self) -> None:
+        books = self.engine.books
+        if not books or (self.daily is not None and all(s in self.daily.bars for s in books)):
+            return
+        missing = {s: float(b.prev_close) for s, b in books.items()
+                   if self.daily is None or s not in self.daily.bars}
+        h = History.synthetic(missing, self.engine.trade_date, dividend=self.settings.resolved_dividend_symbols())
+        if self.daily is None:
+            self.daily = h
+        else:
+            self.daily.bars.update(h.bars)
+            for k, v in h.members.items():
+                self.daily.members.setdefault(k, [])
+                self.daily.members[k] = sorted(set(self.daily.members[k]) | set(v))
+
+    def _append_history_day(self, d: date) -> None:
+        if self.daily is None:
+            return
+        for sym, b in self.engine.books.items():
+            closes = [float(x) for x in self.minute_closes.get(sym, [])] or [float(b.last_price)]
+            self.daily.append_day(d, sym, float(b.last_price), max(closes), min(closes),
+                                    float(b.cumulative_volume), float(b.cumulative_volume * b.last_price),
+                                    b.limit_up_sealed)
+
+    async def refresh_held_days(self, today: date | None = None) -> None:
+        """Trading days each house position has been held (bought yesterday = 1)."""
+        today = today or self.engine.trade_date or datetime.now(CST).date()
+        held = {}
+        for (pid, sym), entry in (await self.store.entry_dates(list(self.meta))).items():
+            n, d = 0, entry
+            while d < today and n < 60:
+                d += timedelta(days=1)
+                n += self.calendar.is_trading_day(d)
+            held[(pid, sym)] = n
+        self.held_days = held
+
+    def symbol_features(self, symbols: list[str]) -> dict[str, dict]:
+        out = {}
+        if self.daily is None:
+            return out
+        day = self.engine.trade_date or datetime.now(CST).date() + timedelta(days=1)
+        for sym in symbols:
+            bars, b = self.daily.bars.get(sym), self.engine.book(sym)
+            if bars is None:
+                continue
+            hist = bars.before(day) if self.engine.day_open else bars
+            live = float(b.last_price) if b and self.engine.day_open else (hist.close[-1] if hist.close else 0.0)
+            if not self.engine.day_open and hist.close:     # after the close, the last bar is today
+                hist = type(hist)(hist.dates[:-1], hist.close[:-1], hist.high[:-1], hist.low[:-1],
+                                  hist.volume[:-1], hist.amount[:-1], hist.limit_up[:-1], hist.div_ttm,
+                                  hist.float_shares)
+            if hist.close and live > 0:
+                out[sym] = hist_features(hist, live)
+        return out
+
+    def breadth(self) -> dict:
+        """Market-wide mood from the arena's own books, plus the index ETFs as proxies for the indices."""
+        up = down = flat = lu = ld = 0
+        for sym, b in self.engine.books.items():
+            if not is_stock_symbol(sym) or b.suspended:
+                continue
+            c = b.last_price - b.prev_close
+            up += c > 0
+            down += c < 0
+            flat += c == 0
+            lu += b.limit_up_sealed
+            ld += b.limit_down_sealed
+        proxies = {}
+        for name, sym in (("沪深300", "510300.SH"), ("上证50", "510050.SH"), ("中证1000", "512100.SH")):
+            b = self.engine.book(sym)
+            if b is not None:
+                proxies[name] = {"symbol": sym, "chg_pct": round(float(b.last_price / b.prev_close - 1) * 100, 2)}
+        return {"up": up, "down": down, "flat": flat, "limit_up": lu, "limit_down": ld, "indices": proxies,
+                "market": self.market_status()}
+
     async def close_day(self) -> None:
         async with self.lock:
             if self.engine.day_open:
@@ -517,6 +618,7 @@ class ArenaService:
     async def _close_day_locked(self) -> None:
         d = self.engine.trade_date
         now = self.now() if not self.settings.is_simulated_clock else datetime.combine(d, time(15, 0, 1), CST)
+        self._append_history_day(d)
         events = self.engine.end_trading_day(now)
         try:
             await self.store.save_marks(d, [(sym, json.dumps(snapshot_to_dict(b), ensure_ascii=False))
@@ -758,8 +860,11 @@ class ArenaService:
         if minute == self._last_bot_minute:
             return
         self._last_bot_minute = minute
+        if self.settings.market_feed != "redis":
+            self._ensure_synthetic_history()
         mv = MarketView(self.engine.trade_date, self.market_now, dict(self.engine.books), dict(self.day_open_px),
-                        {k: list(v) for k, v in self.minute_closes.items()}, self.names)
+                        {k: list(v) for k, v in self.minute_closes.items()}, self.names, self.daily,
+                        self.held_days)
         for intent in self.bots.decide(mv, self.engine.accounts):
             await self._execute_intent(intent)
 
@@ -918,7 +1023,8 @@ class ArenaService:
                 only: list[str] | None = None) -> dict:
         """The tradable universe, searched and sorted server-side (it can be ~1,300 symbols).
 
-        sort: hot (sealed limit-up first, then biggest gainers), gainers, losers, movers (|change|), code."""
+        sort: hot (sealed limit-up first, then biggest gainers), gainers, losers, movers (|change|), code,
+        trend (above the 20-day line, strongest 20-day return first; needs daily history)."""
         books = self.engine.books
         if only:
             rows = [self._symbol_row(s, books[s]) for s in only if s in books]
@@ -931,6 +1037,13 @@ class ArenaService:
                 if needle not in sym and needle not in name.upper():
                     continue
             rows.append(self._symbol_row(sym, b))
+        if sort == "trend":
+            feats = self.symbol_features([r["symbol"] for r in rows if is_stock_symbol(r["symbol"])])
+            rows = [r | {"ret20": feats[r["symbol"]]["ret20"]} for r in rows
+                    if (f := feats.get(r["symbol"])) and f["ret20"] is not None and f["ma20"]
+                    and float(r["last"]) > f["ma20"]]
+            rows.sort(key=lambda r: -r["ret20"])
+            return {"total": len(rows), "symbols": rows[offset:offset + limit]}
         keys = {
             "hot": lambda r: (not r["limit_up_sealed"], -r["chg_pct"]),
             "gainers": lambda r: -r["chg_pct"],

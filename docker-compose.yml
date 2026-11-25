@@ -45,7 +45,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       GATEWAY_INDICES: ${GATEWAY_INDICES:-000300,000016,000852}   # CSI 300, SSE 50, CSI 1000 (~1,300 names)
-      GATEWAY_SYMBOLS: ${GATEWAY_SYMBOLS:-510300.SH}               # extras, e.g. the benchmark ETF
+      GATEWAY_SYMBOLS: ${GATEWAY_SYMBOLS:-510300.SH,510050.SH,512100.SH}   # extras: index ETFs (benchmark + breadth)
       GATEWAY_CONNECTIONS: ${GATEWAY_CONNECTIONS:-4}
       POLL_MS: ${GATEWAY_POLL_MS:-3000}
       TDX_SERVER: ${TDX_SERVER:-}

@@ -58,6 +58,9 @@ class Store:
                     "AND name <> $3 AND NOT EXISTS (SELECT 1 FROM portfolios WHERE season_id = $1 AND name = $3)",
                     row["id"], p.tag, p.name)
                 await conn.execute(
+                    "UPDATE portfolios SET brief = $3 WHERE season_id = $1 AND persona_tag = $2 AND is_official "
+                    "AND brief IS DISTINCT FROM $3", row["id"], p.tag, p.brief)
+                await conn.execute(
                     "INSERT INTO portfolios (season_id, participant_id, name, persona_tag, controller_type, "
                     "is_official, is_benchmark, brief) VALUES ($1, $2, $3, $4, 'openpup_ai', true, $5, $6) "
                     "ON CONFLICT (season_id, name) DO NOTHING",
@@ -315,6 +318,16 @@ class Store:
         return bool(await self.pool.fetchval(
             "SELECT 1 FROM arena_events WHERE season_id = $1 AND event_type = 'market.open' "
             "AND payload->>'trade_date' = $2 LIMIT 1", season_id, trade_date.isoformat()))
+
+    async def entry_dates(self, portfolio_ids: list[str]) -> dict[tuple[str, str], date]:
+        """(portfolio, symbol) -> date of the latest buy, for symbols still held."""
+        rows = await self.pool.fetch(
+            "SELECT DISTINCT ON (t.portfolio_id, t.symbol) t.portfolio_id, t.symbol, t.trade_date FROM trades t "
+            "JOIN positions p ON p.portfolio_id = t.portfolio_id AND p.symbol = t.symbol AND p.qty > 0 "
+            "WHERE t.side = 'buy' AND t.portfolio_id = ANY($1::uuid[]) "
+            "ORDER BY t.portfolio_id, t.symbol, t.trade_date DESC",
+            [uuid.UUID(p) for p in portfolio_ids])
+        return {(str(r["portfolio_id"]), r["symbol"]): r["trade_date"] for r in rows}
 
     async def last_trade_date(self, season_id: uuid.UUID) -> date | None:
         v = await self.pool.fetchval(

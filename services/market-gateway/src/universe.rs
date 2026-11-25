@@ -4,7 +4,7 @@
 //! from the official CSI files (`{code}cons.xls`), refreshed once per trading day. The last good universe is
 //! cached on disk and reused when the download fails, so a CSI outage never empties the arena.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -77,32 +77,48 @@ struct Cache {
     date: String,
     indices: Vec<String>,
     symbols: Vec<String>,
+    #[serde(default)]
+    members: BTreeMap<String, Vec<String>>,
+}
+
+/// The universe plus which index each symbol came from (the bots screen CSI 300 / SSE 50 members).
+pub struct Universe {
+    pub symbols: Vec<String>,
+    pub members: BTreeMap<String, Vec<String>>,
 }
 
 /// Builds the universe: constituents of `indices` (e.g. ["000300", "000016", "000852"]) ∪ `extras`, sorted.
 /// Falls back to the cached list (per index set) when any download fails.
 pub fn build(indices: &[String], extras: &[String], url_tmpl: &str, cache_dir: Option<&Path>, today: &str)
     -> Result<Vec<String>> {
+    build_with_members(indices, extras, url_tmpl, cache_dir, today).map(|u| u.symbols)
+}
+
+pub fn build_with_members(indices: &[String], extras: &[String], url_tmpl: &str, cache_dir: Option<&Path>,
+                          today: &str) -> Result<Universe> {
     let cache_path: Option<PathBuf> = cache_dir.map(|d| d.join("universe.json"));
     let mut set: BTreeSet<String> = extras.iter().cloned().collect();
+    let mut members: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if indices.is_empty() {
-        return Ok(set.into_iter().collect());
+        return Ok(Universe { symbols: set.into_iter().collect(), members });
     }
-    let fetched: Result<Vec<String>> = (|| {
-        let mut all = Vec::new();
+    let fetched: Result<BTreeMap<String, Vec<String>>> = (|| {
+        let mut all = BTreeMap::new();
         for code in indices {
             let syms = parse_constituents(&download(&url_tmpl.replace("{code}", code))?)
                 .with_context(|| format!("index {code}"))?;
             info!("index {code}: {} constituents", syms.len());
-            all.extend(syms);
+            all.insert(code.clone(), syms);
         }
         Ok(all)
     })();
     match fetched {
         Ok(all) => {
-            set.extend(all);
+            set.extend(all.values().flatten().cloned());
+            members = all;
             if let Some(p) = &cache_path {
-                let c = Cache { date: today.to_string(), indices: indices.to_vec(), symbols: set.iter().cloned().collect() };
+                let c = Cache { date: today.to_string(), indices: indices.to_vec(), symbols: set.iter().cloned().collect(),
+                                members: members.clone() };
                 if let Err(e) = std::fs::create_dir_all(p.parent().unwrap()).and_then(|_| {
                     std::fs::write(p, serde_json::to_vec_pretty(&c).unwrap_or_default())
                 }) {
@@ -119,12 +135,13 @@ pub fn build(indices: &[String], extras: &[String], url_tmpl: &str, cache_dir: O
                 Some(c) => {
                     warn!("constituent download failed ({e:#}); using cached universe from {}", c.date);
                     set.extend(c.symbols);
+                    members = c.members;
                 }
                 None => return Err(e.context("constituent download failed and no cached universe")),
             }
         }
     }
-    Ok(set.into_iter().collect())
+    Ok(Universe { symbols: set.into_iter().collect(), members })
 }
 
 #[cfg(test)]
@@ -149,7 +166,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agora-universe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let c = Cache { date: "2026-11-24".into(), indices: vec!["000300".into()],
-                        symbols: vec!["600000.SH".into(), "000001.SZ".into()] };
+                        symbols: vec!["600000.SH".into(), "000001.SZ".into()], members: BTreeMap::new() };
         std::fs::write(dir.join("universe.json"), serde_json::to_vec(&c).unwrap()).unwrap();
         // unreachable URL -> cached list, merged with extras
         let u = build(&["000300".into()], &["600000.SH".into(), "510300.SH".into()],

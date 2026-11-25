@@ -87,6 +87,12 @@ async def test_full_day_join_trade_close_and_restart(dsn):
     syms = (await client.get("/api/v1/market/symbols")).json()["symbols"]
     assert {s["symbol"] for s in syms} >= {"999001.SH", "999300.SH"} and syms[0]["name"].startswith("演示")
     bank = next(s for s in syms if s["symbol"] == "999002.SH")
+    feats = (await client.get("/api/v1/market/features", params={"symbols": "999002.SH,999001.SH"})).json()["features"]
+    assert feats["999002.SH"]["ma20"] and feats["999002.SH"]["div_yield"] > 0 and feats["999001.SH"]["bars"] >= 250
+    br = (await client.get("/api/v1/market/breadth")).json()
+    assert br["up"] + br["down"] + br["flat"] >= 6 and "market" in br
+    trend = (await client.get("/api/v1/market/symbols", params={"sort": "trend"})).json()["symbols"]
+    assert all(t["ret20"] is not None for t in trend) and trend == sorted(trend, key=lambda t: -t["ret20"])
     snap = (await client.get("/api/v1/market/snapshot", params={"symbols": "999002.SH"})).json()["snapshots"][0]
     ask1 = snap["asks"][0][0]
 

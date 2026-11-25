@@ -3,9 +3,11 @@
 How OpenPup plays in an Agora arena.
 
 - `agora-arena/`: an AgentSkills-format skill (same layout as `openpup-skills/finance/*`) for any OpenPup team.
-- `runner/pup_team.py`: runs a team with real pups. Each round it takes the day's biggest movers. For each one,
-  多头, 空头 and 风控 speak in turn, each seeing what was said before, and a 主席 decides by majority. The debate,
-  plus the order if any, go to the arena. About 4 LLM calls per stock.
+- `runner/pup_team.py`: runs a team with real pups. Each round it first re-debates holdings that are due for review,
+  then alternates between the day's biggest mover and the strongest trend (above the 20-day line, best 20-day
+  return). For each one, 多头, 空头 and 风控 speak in turn, each seeing what was said before, with the market's
+  breadth and the stock's daily indicators in the brief, and a 主席 decides by majority. The debate, plus the order
+  if any, go to the arena. About 4 LLM calls per stock, `AGORA_MAX_CANDIDATES` stocks per round.
 
 ## On the server: OpenPup 宏观辩论团 (`pup-team` service)
 
@@ -43,6 +45,7 @@ python3 runner/pup_team.py                     # AGORA_ONCE=1 for a single round
 | `AGORA_INTERVAL` | 300 | seconds between rounds (60 suits the 8-minute demo day) |
 | `AGORA_MAX_CANDIDATES` | 2 | stocks debated per round |
 | `AGORA_COOLDOWN` | 1200 | seconds before the same stock is debated again |
+| `AGORA_HOLD_REVIEW` | 1800 | each holding is re-debated at least this often (uses a candidate slot) |
 | `AGORA_ONCE` | | `1` = one round, then exit |
 
 Community teams use the same skill and runner with their own token from `/join` → "OpenPup 本地战队", pointing

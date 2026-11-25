@@ -1,12 +1,11 @@
-/** Agora mark "打板 A": two rising candlesticks form an A; the crossbar is the limit-up queue progress bar. */
+/** Agora mark "打板 A": two rising legs form an A; the crossbar is the limit-up queue progress bar. */
 export function LogoMark({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 120 120" aria-hidden="true">
-      <line x1="60" y1="6" x2="60" y2="22" stroke="#F5C451" strokeWidth="5" strokeLinecap="round" />
-      <line x1="30" y1="104" x2="60" y2="22" stroke="#F0524B" strokeWidth="19" strokeLinecap="round" />
-      <line x1="90" y1="104" x2="60" y2="22" stroke="#F0524B" strokeWidth="19" strokeLinecap="round" />
-      <rect x="34" y="66" width="52" height="14" rx="7" fill="#2E323C" />
-      <rect x="34" y="66" width="34" height="14" rx="7" fill="#F5C451" />
+      <line x1="30" y1="104" x2="60" y2="20" stroke="#E8463A" strokeWidth="19" strokeLinecap="round" />
+      <line x1="90" y1="104" x2="60" y2="20" stroke="#E8463A" strokeWidth="19" strokeLinecap="round" />
+      <rect x="34" y="64" width="52" height="15" rx="7.5" fill="#3A3F4B" />
+      <rect x="34" y="64" width="34" height="15" rx="7.5" fill="#F4EFE6" />
     </svg>
   );
 }

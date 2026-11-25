@@ -89,6 +89,15 @@ async def test_suspend_ban_hide_and_rate_limits(dsn):
     prof = (await client.get(f"/api/v1/portfolios/{pid}")).json()
     assert prof["status"] == "suspended" and prof["rank"] is None
 
+    # reset-token: old token dies, new one works, same account
+    raw = "agk_" + "n" * 32
+    assert await service.store.reset_token(uuid.UUID(pid), raw[:8], service.hash_token(raw)) == 1
+    await service.refresh_controls()
+    assert (await client.get("/api/v1/agent/state", headers=auth)).status_code == 401
+    auth = {"Authorization": f"Bearer {raw}"}
+    st = await client.get("/api/v1/agent/state", headers=auth)
+    assert st.status_code == 200 and st.json()["portfolio_id"] == pid
+
     # ban: token dead
     await service.store.set_status(uuid.UUID(pid), "banned", "多账号")
     await service.refresh_controls()

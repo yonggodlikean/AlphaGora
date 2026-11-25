@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { INVITE_URL } from "@/components/Logo";
+import { TokenLogin } from "@/components/TokenLogin";
 import { api, ApiError, clearToken, getToken, publicApiRoot, setToken, type Seats } from "@/lib/api";
 
 type Path = "human" | "openpup_ai" | "external_bot";
@@ -57,11 +58,7 @@ export default function JoinPage() {
         body: JSON.stringify({ display_name: name.trim(), kind: path, persona_tag: path === "human" ? style : null,
           brief: brief.trim() || null, invite_code: invite.trim() || null }),
       });
-      if (path === "human") {
-        setToken(r.token, r.name);
-        router.push("/trade");
-        return;
-      }
+      if (path === "human") setToken(r.token, r.name);   // humans are signed in on this browser right away
       setJoined(r);
     } catch (e) {
       setError((e as ApiError).message);
@@ -90,7 +87,12 @@ export default function JoinPage() {
         <div className="toast toast-info">你已经在擂台上了。<Link href="/trade">去交易台</Link> ·{" "}
           <button type="button" onClick={() => { clearToken(); setAlready(false); }} style={{ background: "none", border: 0, color: "var(--gold)", cursor: "pointer", textDecoration: "underline" }}>换个身份重新报名</button>
         </div>
-      ) : null}
+      ) : joined ? null : (
+        <details className="card" style={{ padding: "12px 16px" }}>
+          <summary style={{ cursor: "pointer", fontWeight: 700 }}>已经开过户？用 Token 登录</summary>
+          <div style={{ marginTop: 12 }}><TokenLogin onDone={() => router.push("/trade")} /></div>
+        </details>
+      )}
 
       <div role="tablist" aria-label="参赛方式" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
         {PATHS.map(([id, title, desc]) => (
@@ -166,16 +168,25 @@ export default function JoinPage() {
               <span className="pill pill-down" style={{ alignSelf: "flex-start" }}>登记成功</span>
               <h2 style={{ fontSize: 22 }}>{joined.name} 已上擂台，起始资金 ¥{Number(joined.initial_cash).toLocaleString("zh-CN")}</h2>
               <div className="stack" style={{ border: "1px solid var(--gold-line)", background: "var(--gold-bg)", borderRadius: 12, padding: 14, gap: 8 }}>
-                <span className="small bold" style={{ color: "var(--gold)" }}>API Token 只显示这一次，请马上保存</span>
+                <span className="small bold" style={{ color: "var(--gold)" }}>{path === "human" ? "登录 Token，请马上复制保存" : "API Token 只显示这一次，请马上保存"}</span>
+                <span className="small" style={{ color: "#c9bfa6" }}>{path === "human"
+                  ? "这个浏览器已经自动登录。换浏览器或清了缓存时，在交易台粘贴它就能回来。别发给别人。"
+                  : "你的程序用它下单。别发给别人，泄露了就联系管理员作废。"}</span>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
                   <code className="mono" style={{ flex: "1 1 280px", fontSize: 14, padding: "10px 12px", borderRadius: 8, background: "var(--bg)", wordBreak: "break-all" }}>{joined.token}</code>
                   <button type="button" className="btn btn-ghost bold" style={{ borderColor: "var(--gold-line)", color: "var(--gold)" }}
                     onClick={() => { navigator.clipboard?.writeText(joined.token).catch(() => undefined); setCopied(true); }}>{copied ? "已复制" : "复制"}</button>
                 </div>
               </div>
-              <Step n={2} title={path === "external_bot" ? "用 Token 读取账户状态" : "配置 OpenPup 技能"} code={config} />
-              <Step n={3} title={path === "external_bot" ? "下第一单（带幂等键和理由）" : "提交辩论并下单"} code={firstOrder} />
-              <Link href={`/portfolio/${joined.portfolio_id}`}>去看看你的战队展厅 →</Link>
+              {path === "human" ? (
+                <Link className="btn btn-gold" href="/trade" style={{ alignSelf: "flex-start", minHeight: 48, padding: "0 28px", fontSize: 16, display: "inline-flex", alignItems: "center" }}>存好了，去交易台 →</Link>
+              ) : (
+                <>
+                  <Step n={2} title={path === "external_bot" ? "用 Token 读取账户状态" : "配置 OpenPup 技能"} code={config} />
+                  <Step n={3} title={path === "external_bot" ? "下第一单（带幂等键和理由）" : "提交辩论并下单"} code={firstOrder} />
+                  <Link href={`/portfolio/${joined.portfolio_id}`}>去看看你的战队展厅 →</Link>
+                </>
+              )}
             </>
           )}
         </section>

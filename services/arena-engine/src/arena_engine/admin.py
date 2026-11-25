@@ -8,6 +8,7 @@
     restore <name|id>
     hide order|debate <id> --reason "…"     replace a rationale / debate with "hidden" everywhere; `unhide` undoes
     review                                  sign-ups that share a source (possible multi-accounting)
+    reset-token <name|id>                   leaked token: revoke it and print a new one (account and record kept)
     issue-token <persona>                   token for an official team driven by an external agent
     list-teams
     alert-test                              send a test message to ARENA_ALERT_WEBHOOK
@@ -61,6 +62,8 @@ async def _main(argv: list[str]) -> int:
         if name == "hide":
             p.add_argument("--reason", default=None)
     sub.add_parser("review", help="sign-ups sharing a source")
+    p = sub.add_parser("reset-token", help="revoke a player's token(s) and print a new one")
+    p.add_argument("who", help="portfolio name or id")
     it = sub.add_parser("issue-token", help="token for an official team")
     it.add_argument("persona", choices=sorted(BY_TAG))
     sub.add_parser("list-teams")
@@ -123,6 +126,25 @@ async def _main(argv: list[str]) -> int:
                 return 1
             await store.set_status(row["id"], status, getattr(args, "reason", None))
             print(f"{row['name']}: {row['status']} -> {status} (the engine applies it within 30s)")
+            return 0
+
+        if args.cmd == "reset-token":
+            row = await store.find_portfolio(sid, args.who)
+            if row is None:
+                print(f"no portfolio {args.who!r} in season {season['slug']}", file=sys.stderr)
+                return 1
+            if row["is_official"]:
+                print("official teams use the pre-shared PUP_TEAM_TOKEN / issue-token instead", file=sys.stderr)
+                return 1
+            if row["status"] == "banned":
+                print("banned accounts stay banned; create a new invite instead", file=sys.stderr)
+                return 1
+            raw = "agk_" + secrets.token_urlsafe(24)
+            digest = hmac.new(settings.token_pepper.encode(), raw.encode(), hashlib.sha256).digest()
+            n = await store.reset_token(row["id"], raw[:8], digest)
+            print(f"# {row['name']}: {n} old token(s) revoked; they stop working within 30s. Send the player:",
+                  file=sys.stderr)
+            print(raw)
             return 0
 
         if args.cmd in ("hide", "unhide"):

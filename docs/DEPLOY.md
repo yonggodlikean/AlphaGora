@@ -95,6 +95,7 @@ engine within 30 seconds):
 | Hide a rationale or a debate | `hide order <id> --reason "ad"` · `hide debate <id>` · `unhide …` |
 | Suspend (no trading, off the board, reversible) | `suspend <name> --reason "…"` · `restore <name>` |
 | Ban (token revoked, orders canceled) | `ban <name> --reason "…"` |
+| Player leaked their token: new token, same account and record | `reset-token <name>` (prints the new token; the old one stops working within 30s) |
 | Accounts signed up from the same source | `review` |
 
 Extra blocked words: put a UTF-8 file (one word per line) in the engine container and set `ARENA_BLOCKLIST`.

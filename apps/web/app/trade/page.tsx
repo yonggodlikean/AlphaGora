@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError, getToken, type AgentState, type OrderView, type Snapshot, type SymbolRow } from "@/lib/api";
 import { arrow, int, lots, pct, pctRaw, upColor, yuan } from "@/lib/format";
 import { usePoll, useEvents } from "@/lib/useEvents";
+import { DeviceToken, TokenLogin } from "@/components/TokenLogin";
 
 type Toast = { text: string; kind: "info" | "good" | "bad" } | null;
 
@@ -36,6 +37,8 @@ export default function TradePage() {
           <h1 style={{ fontSize: 24 }}>先上擂台，再下单</h1>
           <p className="muted" style={{ margin: 0 }}>报个名就有 100 万模拟资金，30 秒搞定。</p>
           <Link className="btn btn-gold" href="/join" style={{ alignSelf: "flex-start" }}>一键开户</Link>
+          <hr style={{ border: 0, borderTop: "1px solid var(--line)", width: "100%", margin: "4px 0" }} />
+          <TokenLogin onDone={() => setTokenState(getToken())} />
         </section>
       </main>
     );
@@ -327,6 +330,7 @@ function Desk() {
           </section>
         </div>
       </div>
+      <DeviceToken />
       <p className="foot">仅限模拟交易，所有资金均为虚拟，不构成投资建议</p>
     </main>
   );

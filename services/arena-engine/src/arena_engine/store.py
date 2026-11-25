@@ -235,6 +235,16 @@ class Store:
             "INSERT INTO api_tokens (portfolio_id, token_prefix, token_hash) VALUES ($1, $2, $3)",
             uuid.UUID(portfolio_id), token_prefix, token_hash)
 
+    async def reset_token(self, portfolio_id: uuid.UUID, token_prefix: str, token_hash: bytes) -> int:
+        """Revoke every live token of the portfolio and issue a new one. Returns how many were revoked."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            n = int((await conn.execute(
+                "UPDATE api_tokens SET revoked_at = now() WHERE portfolio_id = $1 AND revoked_at IS NULL",
+                portfolio_id)).split()[-1])
+            await conn.execute("INSERT INTO api_tokens (portfolio_id, token_prefix, token_hash) VALUES ($1, $2, $3)",
+                               portfolio_id, token_prefix, token_hash)
+        return n
+
     async def token_exists(self, token_hash: bytes) -> bool:
         return bool(await self.pool.fetchval("SELECT 1 FROM api_tokens WHERE token_hash = $1", token_hash))
 

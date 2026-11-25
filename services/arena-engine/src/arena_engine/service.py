@@ -361,6 +361,7 @@ class ArenaService:
                          if st != "active" and self.status.get(pid, ("active", None))[0] == "active"]
         self.status = statuses
         self.hidden = await self.store.hidden_refs()
+        self._token_cache = {}    # re-checked against the DB on next use, so `admin reset-token` bites within 30s
         if newly_blocked:
             async with self.lock:
                 events = []

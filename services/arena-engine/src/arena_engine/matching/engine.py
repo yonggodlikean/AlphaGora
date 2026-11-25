@@ -186,6 +186,14 @@ class AShareMatchingEngine:
     def books(self) -> dict[str, L1Snapshot]:
         return self._books
 
+    def prime_books(self, snaps: list[L1Snapshot]) -> None:
+        """Last known prices while no day is open (after a restart outside the session): they value positions and
+        fill the symbol list. The next day's first snapshot clears them like any other book."""
+        if self._day_open:
+            return
+        for s in snaps:
+            self._books.setdefault(s.symbol, s)
+
     def open_orders(self, symbol: str | None = None) -> list[Order]:
         books = [self._open.get(symbol, {})] if symbol else list(self._open.values())
         return sorted((o for b in books for o in b.values()), key=lambda o: o.seq)

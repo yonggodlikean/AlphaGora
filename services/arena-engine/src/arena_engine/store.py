@@ -245,6 +245,17 @@ class Store:
                                portfolio_id, token_prefix, token_hash)
         return n
 
+    async def save_marks(self, trade_date, marks: list[tuple[str, str]]) -> None:
+        """(symbol, snapshot JSON) for every symbol at the close; one row per symbol, overwritten."""
+        await self.pool.executemany(
+            "INSERT INTO market_marks (symbol, trade_date, data) VALUES ($1, $2, $3::jsonb) ON CONFLICT (symbol) "
+            "DO UPDATE SET trade_date = EXCLUDED.trade_date, data = EXCLUDED.data, updated_at = now()",
+            [(sym, trade_date, data) for sym, data in marks])
+
+    async def load_marks(self) -> list[dict]:
+        rows = await self.pool.fetch("SELECT data FROM market_marks")
+        return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
+
     async def token_exists(self, token_hash: bytes) -> bool:
         return bool(await self.pool.fetchval("SELECT 1 FROM api_tokens WHERE token_hash = $1", token_hash))
 

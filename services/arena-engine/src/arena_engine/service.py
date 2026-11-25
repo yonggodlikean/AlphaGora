@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time as time_mod
 import hashlib
+import json
 import hmac
 import logging
 import math
@@ -33,7 +34,7 @@ from .domain.models import Fill, Order, OrderRequest, Position
 from .house_bots import HouseBots, Intent, MarketView
 from .market.calendar import CST, TradingCalendar
 from .market.demo import DemoFeed, EndOfDay
-from .market.feed import RedisStreamFeed, ReplayFeed
+from .market.feed import RedisStreamFeed, ReplayFeed, snapshot_from_dict, snapshot_to_dict
 from .market.snapshot import L1Snapshot
 from .matching.rate_limit import SlidingWindowLimiter
 from .moderation import ContentFilter
@@ -122,6 +123,7 @@ class ArenaService:
         if self._pending_restore:
             log.info("%d open orders waiting to be restored", len(self._pending_restore))
         self.names = await self.store.symbol_names()
+        await self.load_marks()
         external = self.settings.resolved_external_teams()
         teams = {p.id: p.persona_tag for p in self.meta.values()
                  if p.is_official and p.persona_tag in BY_TAG and p.persona_tag not in external}
@@ -492,6 +494,21 @@ class ArenaService:
                 "human": {"taken": human, "total": self.settings.seats_human},
                 "ai": {"taken": ai, "total": self.settings.seats_ai}}
 
+    async def load_marks(self) -> int:
+        """After a restart with no day open, value positions and list symbols at the last close."""
+        if self.engine.day_open:
+            return 0
+        snaps = []
+        for d in await self.store.load_marks():
+            try:
+                snaps.append(snapshot_from_dict(d))
+            except Exception as exc:      # one bad row must not stop the engine
+                log.warning("skipping stored close for %s: %s", d.get("symbol"), exc)
+        self.engine.prime_books(snaps)
+        if snaps:
+            log.info("loaded %d closing prices from %s", len(snaps), max(s.ts for s in snaps).date())
+        return len(snaps)
+
     async def close_day(self) -> None:
         async with self.lock:
             if self.engine.day_open:
@@ -501,6 +518,11 @@ class ArenaService:
         d = self.engine.trade_date
         now = self.now() if not self.settings.is_simulated_clock else datetime.combine(d, time(15, 0, 1), CST)
         events = self.engine.end_trading_day(now)
+        try:
+            await self.store.save_marks(d, [(sym, json.dumps(snapshot_to_dict(b), ensure_ascii=False))
+                                            for sym, b in self.engine.books.items()])
+        except Exception:                 # nice to have: never block the close on it
+            log.exception("could not save closing prices")
         expired = [e.payload for e in events if e.type == ev.ORDER_EXPIRED]
         badges: list[tuple[str, str, str | None]] = []
         for o in expired:

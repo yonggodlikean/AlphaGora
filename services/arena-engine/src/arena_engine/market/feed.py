@@ -44,6 +44,18 @@ def snapshot_from_dict(d: dict) -> L1Snapshot:
     )
 
 
+def snapshot_to_dict(s: L1Snapshot) -> dict:
+    """Inverse of `snapshot_from_dict`."""
+    d = {"symbol": s.symbol, "ts": s.ts.isoformat(), "seq": s.seq,
+         "bids": [[str(l.price), l.volume] for l in s.bids], "asks": [[str(l.price), l.volume] for l in s.asks],
+         "last_price": str(s.last_price), "cumulative_volume": s.cumulative_volume,
+         "upper_limit": str(s.upper_limit), "lower_limit": str(s.lower_limit), "prev_close": str(s.prev_close),
+         "suspended": s.suspended}
+    if s.extra.get("name"):
+        d["name"] = s.extra["name"]
+    return d
+
+
 class ReplayFeed:
     """Replays recorded snapshots (JSONL files or in-memory) for local dev, demos and deterministic tests.
     `speed=0` replays as fast as possible; `speed=1.0` honours the original 3s spacing."""

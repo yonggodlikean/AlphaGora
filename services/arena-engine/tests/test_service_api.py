@@ -162,6 +162,8 @@ async def test_full_day_join_trade_close_and_restart(dsn):
     assert prof["positions"][0]["frozen_qty"] == 1000 and any(b["count"] for b in prof["badges"])
 
     cash_before = service.engine.account(pid).cash
+    equity_at_close = (await client.get("/api/v1/agent/state", headers=auth)).json()["total_equity"]
+    n_symbols = len(service.engine.books)
     await client.aclose()
     await service.stop()
     await pool.close()
@@ -169,6 +171,10 @@ async def test_full_day_join_trade_close_and_restart(dsn):
     # --- restart on the same database: state survives, T+1 settles on the next day
     service2, client2, pool2 = await boot(dsn)
     assert service2.engine.account(pid).cash == cash_before
+    # after-hours restart: positions are still valued at the close, and the symbol list is not empty
+    assert len(service2.engine.books) == n_symbols and not service2.engine.day_open
+    assert (await client2.get("/api/v1/agent/state", headers=auth)).json()["total_equity"] == equity_at_close
+    assert (await client2.get("/api/v1/market/symbols")).json()["total"] == n_symbols
     r = await client2.post("/api/v1/agent/orders", json=order, headers=auth)
     assert r.json()["duplicate"] is True             # idempotency survives restarts (DB-backed)
     day2 = market.day(DAY2)

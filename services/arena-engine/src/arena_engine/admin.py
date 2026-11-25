@@ -30,6 +30,7 @@ from .config import Settings
 from .db import create_pool, migrate
 from .market.calendar import CST
 from .personas import BY_TAG
+from .seasons import season_for
 from .store import Store
 
 
@@ -85,7 +86,14 @@ async def _main(argv: list[str]) -> int:
         await migrate(pool, settings.migrations_dir)
         store = Store(pool)
         today = datetime.now(CST).date()
-        season = await store.ensure_season(settings.resolved_season_slug(), today, today + timedelta(days=120))
+        season = None
+        if not settings.season_slug and settings.market_feed == "redis":     # rotating seasons: the open one
+            season = await store.open_auto_season()
+            if season is None:
+                spec = season_for(today)
+                season = await store.ensure_season(spec.slug, spec.start, spec.end, spec.name)
+        if season is None:
+            season = await store.ensure_season(settings.resolved_season_slug(), today, today + timedelta(days=120))
         sid = season["id"]
 
         if args.cmd == "invites":

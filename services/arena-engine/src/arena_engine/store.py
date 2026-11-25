@@ -41,7 +41,105 @@ class Store:
         self.pool = pool
 
     # ------------------------------------------------------------------ season & portfolios
-    async def ensure_season(self, slug: str, start: date, end: date) -> dict:
+    async def open_auto_season(self) -> dict | None:
+        """The newest rotating season (s{n}-…) that has not been settled yet."""
+        row = await self.pool.fetchrow(
+            "SELECT * FROM seasons WHERE slug ~ '^s[0-9]+-[0-9]{4}(w|sp|su|au)$' AND status <> 'settled' "
+            "ORDER BY start_date DESC LIMIT 1")
+        return dict(row) if row else None
+
+    async def season_by_slug(self, slug: str) -> dict | None:
+        row = await self.pool.fetchrow("SELECT * FROM seasons WHERE slug = $1", slug)
+        return dict(row) if row else None
+
+    async def seasons(self) -> list[dict]:
+        return [dict(r) for r in await self.pool.fetch(
+            "SELECT slug, name, start_date, end_date, status FROM seasons WHERE slug <> 'demo' ORDER BY start_date DESC")]
+
+    async def settle_season(self, season_id: uuid.UUID, rows: list[dict], badges: list[tuple[str, str, uuid.UUID]]) -> bool:
+        """Final standings + season badges, once (False if the season was already settled)."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            status = await conn.fetchval("SELECT status FROM seasons WHERE id = $1 FOR UPDATE", season_id)
+            if status == "settled":
+                return False
+            await conn.executemany(
+                "INSERT INTO season_results (season_id, portfolio_id, rank, cum_return, excess_return, final_equity, "
+                "trades) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
+                [(season_id, uuid.UUID(r["portfolio_id"]), r["rank"], r["cum_return"], r["excess_return"],
+                  r["final_equity"], r["trades"]) for r in rows])
+            await conn.executemany(
+                "INSERT INTO portfolio_badges (portfolio_id, badge_code, ref_id) VALUES ($1, $2, $3)",
+                [(uuid.UUID(pid), code, ref) for pid, code, ref in badges])
+            await conn.execute("UPDATE seasons SET status = 'settled' WHERE id = $1", season_id)
+            return True
+
+    async def season_trade_counts(self, season_id: uuid.UUID) -> dict[str, int]:
+        rows = await self.pool.fetch(
+            "SELECT t.portfolio_id, count(*) n FROM trades t JOIN portfolios p ON p.id = t.portfolio_id "
+            "WHERE p.season_id = $1 GROUP BY t.portfolio_id", season_id)
+        return {str(r["portfolio_id"]): r["n"] for r in rows}
+
+    async def last_snapshots(self, season_id: uuid.UUID) -> dict[str, dict]:
+        rows = await self.pool.fetch(
+            "SELECT DISTINCT ON (d.portfolio_id) d.* FROM daily_snapshots d JOIN portfolios p ON p.id = d.portfolio_id "
+            "WHERE p.season_id = $1 ORDER BY d.portfolio_id, d.trade_date DESC", season_id)
+        return {str(r["portfolio_id"]): dict(r) for r in rows}
+
+    async def carry_over(self, old_season: uuid.UUID, new_season: uuid.UUID) -> list[tuple[str, str]]:
+        """Re-enters every community team in the new season: same participant, name, controller and token.
+        Banned teams stay out; so does a team with no trade in this season and none in the one before."""
+        moved = []
+        async with self.pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                """SELECT p.*, (SELECT count(*) FROM trades t WHERE t.portfolio_id = p.id) AS n_trades,
+                          (SELECT count(*) FROM trades t WHERE t.portfolio_id = p.carried_from) AS n_prev
+                   FROM portfolios p WHERE p.season_id = $1 AND NOT p.is_official AND p.status <> 'banned'""",
+                old_season)
+            for r in rows:
+                if r["n_trades"] == 0 and (r["carried_from"] is not None and r["n_prev"] == 0):
+                    continue                     # two quiet seasons in a row: the seat goes back
+                new_id = await conn.fetchval(
+                    "INSERT INTO portfolios (season_id, participant_id, name, persona_tag, controller_type, is_official, "
+                    "is_benchmark, brief, status, status_reason, carried_from) "
+                    "VALUES ($1,$2,$3,$4,$5,false,false,$6,$7,$8,$9) ON CONFLICT (season_id, name) DO NOTHING RETURNING id",
+                    new_season, r["participant_id"], r["name"], r["persona_tag"], r["controller_type"], r["brief"],
+                    r["status"], r["status_reason"], r["id"])
+                if new_id is None:
+                    continue
+                await conn.execute("UPDATE api_tokens SET portfolio_id = $2 WHERE portfolio_id = $1 AND revoked_at IS NULL",
+                                   r["id"], new_id)
+                moved.append((str(r["id"]), str(new_id)))
+            # invite codes nobody has used up yet keep working in the new season
+            await conn.execute("UPDATE invites SET season_id = $2 WHERE season_id = $1 AND revoked_at IS NULL "
+                               "AND used < max_uses", old_season, new_season)
+        return moved
+
+    async def career(self, portfolio_id: str) -> list[dict]:
+        """Earlier seasons of the same team (following carried_from back), newest first."""
+        rows = await self.pool.fetch(
+            """WITH RECURSIVE chain AS (
+                 SELECT id, carried_from, 0 AS depth FROM portfolios WHERE id = $1
+                 UNION ALL SELECT p.id, p.carried_from, c.depth + 1 FROM portfolios p JOIN chain c ON p.id = c.carried_from
+                 WHERE c.depth < 40)
+               SELECT s.slug, s.name, r.rank, r.cum_return, r.excess_return, r.final_equity, r.trades,
+                      (SELECT array_agg(b.badge_code) FROM portfolio_badges b WHERE b.portfolio_id = c.id) AS badges
+               FROM chain c JOIN portfolios p ON p.id = c.id JOIN seasons s ON s.id = p.season_id
+               LEFT JOIN season_results r ON r.portfolio_id = c.id
+               WHERE c.depth > 0 ORDER BY c.depth""", uuid.UUID(portfolio_id))
+        return [dict(r) for r in rows]
+
+    async def season_standings(self, season_id: uuid.UUID) -> list[dict]:
+        rows = await self.pool.fetch(
+            "SELECT r.*, p.name, p.controller_type::text AS controller_type, p.is_official, p.is_benchmark "
+            "FROM season_results r JOIN portfolios p ON p.id = r.portfolio_id WHERE r.season_id = $1 "
+            "ORDER BY r.rank NULLS LAST", season_id)
+        return [dict(r) for r in rows]
+
+    async def badge_ref_exists(self, code: str, ref: uuid.UUID) -> bool:
+        return bool(await self.pool.fetchval(
+            "SELECT 1 FROM portfolio_badges WHERE badge_code = $1 AND ref_id = $2 LIMIT 1", code, ref))
+
+    async def ensure_season(self, slug: str, start: date, end: date, name: str | None = None) -> dict:
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 "INSERT INTO participants (id, display_name, is_house) VALUES ($1, 'Agora House', true) "
@@ -50,7 +148,7 @@ class Store:
             if row is None:
                 row = await conn.fetchrow(
                     "INSERT INTO seasons (slug, name, start_date, end_date, status) VALUES ($1, $2, $3, $4, 'live') "
-                    "RETURNING *", slug, "演示赛季" if slug == "demo" else slug, start, end)
+                    "RETURNING *", slug, name or ("演示赛季" if slug == "demo" else slug), start, end)
             for p in PERSONAS:
                 # Keep official team names in sync with personas.py (a rename must not create a second team).
                 await conn.execute(

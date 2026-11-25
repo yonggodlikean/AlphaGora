@@ -32,6 +32,7 @@ from .domain.errors import ArenaError, MarketDataError, OrderRejected, PublicErr
 from .domain.events import ArenaEvent
 from .domain.models import Fill, Order, OrderRequest, Position
 from . import corporate
+from .seasons import month_key, season_for
 from .house_bots import HouseBots, Intent, MarketView, is_stock as is_stock_symbol
 from .market.history import History, features as hist_features
 from .market.calendar import CST, TradingCalendar
@@ -61,6 +62,9 @@ HIDDEN_TEXT = "（该内容已被管理员隐藏）"
 
 def _dec(x: float | Decimal) -> Decimal:
     return Decimal(str(x)).quantize(Q8)
+
+
+SEASON_NS = uuid.UUID("2b5d0c1e-4f7a-4c39-9d0e-7a1c3e5b9f20")
 
 
 class ArenaService:
@@ -118,17 +122,41 @@ class ArenaService:
     # ================================================================== lifecycle
     async def start(self) -> None:
         today = datetime.now(CST).date()
-        self.season = await self.store.ensure_season(self.settings.resolved_season_slug(), today,
-                                                     today + timedelta(days=120))
+        # Live arenas rotate seasons by the calendar (seasons.py); demo, replay and a pinned slug never rotate.
+        self.auto_season = not self.settings.season_slug and self.settings.market_feed == "redis"
+        if self.auto_season:
+            row = await self.store.open_auto_season()
+            if row is None:
+                spec = season_for(today)
+                row = await self.store.ensure_season(spec.slug, spec.start, spec.end, spec.name)
+            else:      # seeds/renames the official teams
+                row = await self.store.ensure_season(row["slug"], row["start_date"], row["end_date"])
+        else:
+            row = await self.store.ensure_season(self.settings.resolved_season_slug(), today,
+                                                 today + timedelta(days=120))
+        self.names = await self.store.symbol_names()
+        await self._enter_season(row)
+        await self.load_marks()
+        if self.settings.auto_start_feed:
+            await self.start_feed()
+            await self.refresh_history()
+            self._tasks.append(asyncio.create_task(self._run_housekeeping(), name="housekeeping"))
+
+    async def _enter_season(self, row: dict) -> None:
+        """Everything that belongs to one season: accounts, tokens, team drivers, statuses. Also used at rollover,
+        on a fresh engine."""
+        self.season = dict(row)
         self.season_id = self.season["id"]
+        if self.meta:
+            self.engine = AShareMatchingEngine(self.calendar)
+            self.meta, self.balances, self.history = {}, {}, {}
+            self._token_cache, self._first_trade_done, self.held_days = {}, set(), {}
         await self._load_portfolios()
         # Open orders from a previous run are restored into their own trade date once it reopens (first snapshot),
         # or expired if the market has moved on to a new day.
         self._pending_restore = list(await self.store.load_open_orders(list(self.meta)))
         if self._pending_restore:
             log.info("%d open orders waiting to be restored", len(self._pending_restore))
-        self.names = await self.store.symbol_names()
-        await self.load_marks()
         external = self.settings.resolved_external_teams()
         teams = {p.id: p.persona_tag for p in self.meta.values()
                  if p.is_official and p.persona_tag in BY_TAG and p.persona_tag not in external}
@@ -149,10 +177,115 @@ class ArenaService:
             if await self.store.has_badge(pid, "first_trade"):
                 self._first_trade_done.add(pid)
         await self.refresh_held_days()
-        if self.settings.auto_start_feed:
-            await self.start_feed()
-            await self.refresh_history()
-            self._tasks.append(asyncio.create_task(self._run_housekeeping(), name="housekeeping"))
+        log.info("season %s (%s → %s): %d teams", self.season["name"], self.season["start_date"],
+                 self.season["end_date"], len(self.meta))
+
+    # ================================================================== seasons
+    async def _season_boundaries(self, d: date) -> None:
+        """Called before a new trading day opens: award last month's best, and settle + roll the season over
+        when `d` is past its end."""
+        await self._award_month(d)
+        if self.auto_season and d > self.season["end_date"]:
+            await self._rollover(d)
+
+    async def _award_month(self, d: date) -> None:
+        last = max((h["trade_date"] for hs in self.history.values() for h in hs), default=None)
+        if last is None or (last.year, last.month) == (d.year, d.month):
+            return
+        month = month_key(last)
+        ref = uuid.uuid5(SEASON_NS, f"month:{self.season_id}:{month}")
+        if await self.store.badge_ref_exists("month_best", ref):
+            return
+        best: list[tuple[float, str]] = []
+        for pid, m in self.meta.items():
+            if m.is_benchmark or not self.is_active(pid):
+                continue
+            r = self._period_return(pid, date(last.year, last.month, 1), last)
+            if r is not None:
+                best.append((r, pid))
+        if not best:
+            return
+        top = max(best)[0]
+        winners = [pid for r, pid in best if r == top and r > 0]
+        if winners:
+            await self._handle([], [], badges=[(pid, "month_best", str(ref)) for pid in winners])
+            log.info("month %s best: %s (%+.2f%%)", month, ", ".join(self._name(p) for p in winners), top * 100)
+
+    def _period_return(self, pid: str, start: date, end: date | None, live: Decimal | None = None) -> float | None:
+        """Return from the last snapshot before `start` (or the initial cash) to the snapshot on/before `end`,
+        or to `live` equity when given."""
+        hist = self.history.get(pid, [])
+        initial = self.engine.accounts[pid].initial_cash if pid in self.engine.accounts else Decimal(self.season["initial_cash"])
+        before = [h for h in hist if h["trade_date"] < start]
+        base = Decimal(before[-1]["total_equity"]) if before else initial
+        if live is not None:
+            final = live
+        else:
+            upto = [h for h in hist if h["trade_date"] <= end] if end else hist
+            if not upto or upto[-1]["trade_date"] < start:
+                return None
+            final = Decimal(upto[-1]["total_equity"])
+        return float(final / base - 1) if base > 0 else None
+
+    async def _rollover(self, d: date) -> None:
+        old = self.season
+        snaps = await self.store.last_snapshots(old["id"])
+        trades = await self.store.season_trade_counts(old["id"])
+        initial = Decimal(old["initial_cash"])
+        bench = next((p for p, m in self.meta.items() if m.is_benchmark), None)
+        bench_cum = float(snaps[bench]["cum_return"]) if bench in snaps else 0.0
+        rows = []
+        for pid, m in self.meta.items():
+            if self.status.get(pid, ("active",))[0] == "banned":
+                continue
+            s = snaps.get(pid)
+            cum = float(s["cum_return"]) if s else 0.0
+            rows.append({"portfolio_id": pid, "cum_return": cum, "excess_return": cum - bench_cum,
+                         "final_equity": s["total_equity"] if s else initial, "trades": trades.get(pid, 0),
+                         "benchmark": m.is_benchmark, "rank": None})
+        ranked = sorted((r for r in rows if not r["benchmark"]), key=lambda r: -r["cum_return"])
+        for i, r in enumerate(ranked, 1):
+            r["rank"] = i
+        ref = uuid.uuid5(SEASON_NS, f"season:{old['id']}")
+        badges = []
+        for r in ranked:
+            if r["rank"] == 1:
+                badges.append((r["portfolio_id"], "season_champion", ref))
+            if r["rank"] <= 3:
+                badges.append((r["portfolio_id"], "season_top3", ref))
+            if r["trades"] > 0 and r["cum_return"] > bench_cum:
+                badges.append((r["portfolio_id"], "season_beat_index", ref))
+        if await self.store.settle_season(old["id"], rows, badges):
+            champ = ranked[0] if ranked else None
+            await self._emit("season.settled", None, {
+                "season": old["slug"], "name": old["name"],
+                "champion": None if champ is None else {"portfolio_id": champ["portfolio_id"],
+                                                        "name": self._name(champ["portfolio_id"]),
+                                                        "cum_return": champ["cum_return"]},
+                "benchmark_return": bench_cum, "teams": len(ranked)})
+        spec = season_for(d)
+        new = await self.store.ensure_season(spec.slug, spec.start, spec.end, spec.name)
+        moved = await self.store.carry_over(old["id"], new["id"])
+        await self._enter_season(new)
+        await self._emit("season.started", None, {"season": new["slug"], "name": new["name"],
+                                                   "start": str(new["start_date"]), "end": str(new["end_date"]),
+                                                   "carried": len(moved)})
+        log.warning("season %s settled; %s started with %d carried-over teams", old["slug"], new["slug"], len(moved))
+
+    async def season_report(self, slug: str) -> dict | None:
+        row = await self.store.season_by_slug(slug)
+        if row is None:
+            return None
+        standings = await self.store.season_standings(row["id"])
+        for s in standings:
+            s["portfolio_id"] = str(s.pop("portfolio_id"))
+            s.pop("season_id", None)
+            for k in ("cum_return", "excess_return"):
+                s[k] = float(s[k])
+            s["final_equity"] = str(s["final_equity"])
+        return {"slug": row["slug"], "name": row["name"], "start": str(row["start_date"]),
+                "end": str(row["end_date"]), "status": row["status"], "standings": standings,
+                "current": row["id"] == self.season_id}
 
     async def _load_portfolios(self) -> None:
         metas = await self.store.portfolios(self.season_id)
@@ -324,6 +457,8 @@ class ArenaService:
             self.minute_closes[sym][-1] = snap.last_price
 
     async def _open_day_locked(self, d: date, now: datetime) -> None:
+        if not await self.store.has_market_open(self.season_id, d):
+            await self._season_boundaries(d)
         resumed = await self.store.has_market_open(self.season_id, d)
         if resumed:
             events = self.engine.resume_trading_day(d, now)
@@ -1005,9 +1140,11 @@ class ArenaService:
             return "official_ai" if m.is_official else "community_ai"
         return {"human": "human", "hybrid": "hybrid"}.get(m.controller_type, "bot")
 
-    def leaderboard(self, group: str = "all") -> list[dict]:
+    def leaderboard(self, group: str = "all", period: str = "season") -> list[dict]:
+        """period: season (cumulative since the season started) or month (since the last close before the 1st)."""
         bench = self.benchmark_return()
         today = self.engine.trade_date
+        month_start = (today or datetime.now(CST).date()).replace(day=1)
         rows = []
         for pid, m in self.meta.items():
             if not self.is_active(pid):
@@ -1023,11 +1160,14 @@ class ArenaService:
             hist = [h for h in self.history.get(pid, []) if today is None or h["trade_date"] < today]
             prev = Decimal(hist[-1]["total_equity"]) if hist else initial
             spark = [float(h["cum_return"]) for h in hist[-19:]] + [cum]
+            month = self._period_return(pid, month_start, None, live=eq)
             rows.append({"portfolio_id": pid, "name": m.name, "group": g, "persona_tag": m.persona_tag,
                          "cum_return": cum, "excess_return": cum - bench, "day_return": float(eq / prev - 1),
+                         "month_return": month,
                          "driver": self.driver(pid), "cheers": self.cheers.get(pid, 0),
                          "equity": str(money(eq)), "spark": [0.0] + spark if len(spark) == 1 else spark})
-        rows.sort(key=lambda r: r["cum_return"], reverse=True)
+        key = "month_return" if period == "month" else "cum_return"
+        rows.sort(key=lambda r: r[key] if r[key] is not None else -1e9, reverse=True)
         place = 0
         for r in rows:
             if r["group"] == "benchmark":
@@ -1122,6 +1262,7 @@ class ArenaService:
         return {"conflicts": conflicts[:6], "roast": roast[0]["data"] if roast else None,
                 "queues": self.queues(), "market": self.market_status(),
                 "season": {"slug": self.season["slug"], "name": self.season["name"],
+                           "start": str(self.season["start_date"]), "end": str(self.season["end_date"]),
                            "trading_days": len({h["trade_date"] for hs in self.history.values() for h in hs})
                            + (1 if self.engine.day_open else 0)}}
 
@@ -1163,7 +1304,11 @@ class ArenaService:
             mdd = min(mdd, float(e / peak - 1))
         win = (await self.store.win_rates([pid])).get(pid)
         got, queued = await self.store.queue_stats(pid)
-        counts = await self.store.badge_counts(pid)
+        counts = dict(await self.store.badge_counts(pid))
+        career = await self.store.career(pid)
+        for c in career:                                 # badges earned in earlier seasons count too
+            for code in c.get("badges") or []:
+                counts[code] = counts.get(code, 0) + 1
         roast = await self.store.latest_events(self.season_id, "roast.daily", 1)
         acct = self.engine.accounts[pid]
         positions = []
@@ -1192,6 +1337,11 @@ class ArenaService:
             "driver": self.driver(pid),
             "cheers": self.cheers.get(pid, 0),
             "status": self.status.get(pid, ("active", None))[0],
+            "season": {"slug": self.season["slug"], "name": self.season["name"]},
+            "career": [{"season": c["slug"], "name": c["name"], "rank": c["rank"],
+                        "cum_return": None if c["cum_return"] is None else float(c["cum_return"]),
+                        "excess_return": None if c["excess_return"] is None else float(c["excess_return"]),
+                        "trades": c["trades"]} for c in career],
         }
 
     async def timeline(self, pid: str) -> list[dict]:

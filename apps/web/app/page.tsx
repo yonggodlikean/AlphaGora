@@ -9,17 +9,20 @@ import { usePoll, useEvents } from "@/lib/useEvents";
 
 type Tab = "all" | "ai" | "human";
 const TABS: [Tab, string][] = [["all", "全部"], ["ai", "AI 战队"], ["human", "人类与 Bot"]];
+type Period = "season" | "month";
+const PERIODS: [Period, string][] = [["season", "赛季"], ["month", "本月"]];
 
 export default function ArenaPage() {
   const [feed, setFeed] = useState<Feed | null>(null);
   const [rows, setRows] = useState<BoardRow[] | null>(null);
   const [tab, setTab] = useState<Tab>("all");
+  const [period, setPeriod] = useState<Period>("season");
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     api<Feed>("/api/v1/arena/feed").then((f) => { setFeed(f); setError(null); }).catch((e) => setError(e.message));
-    api<{ rows: BoardRow[] }>(`/api/v1/leaderboard?group=${tab}`).then((r) => setRows(r.rows)).catch(() => undefined);
-  }, [tab]);
+    api<{ rows: BoardRow[] }>(`/api/v1/leaderboard?group=${tab}&period=${period}`).then((r) => setRows(r.rows)).catch(() => undefined);
+  }, [tab, period]);
   usePoll(load, 10000);
 
   useEvents((e) => {
@@ -65,20 +68,32 @@ export default function ArenaPage() {
 
       <section className="card" aria-labelledby="board-title">
         <div className="between" style={{ marginBottom: 14 }}>
-          <h2 id="board-title">排行榜{feed ? <span className="small muted" style={{ fontWeight: 400, marginLeft: 10 }}>{feed.season.name} · 第 {feed.season.trading_days} 个交易日</span> : null}</h2>
-          <div className="tabs" role="tablist" aria-label="榜单分组">
-            {TABS.map(([id, label]) => (
-              <button key={id} type="button" role="tab" className="tab" aria-selected={tab === id} onClick={() => setTab(id)}>{label}</button>
-            ))}
+          <h2 id="board-title">排行榜{feed ? (
+            <span className="small muted" style={{ fontWeight: 400, marginLeft: 10 }}>
+              {feed.season.name} · 第 {feed.season.trading_days} 个交易日{feed.season.end ? ` · ${feed.season.end.slice(5).replace("-", " 月 ")} 日收官` : ""}
+              {" · "}<Link href="/seasons">往届战报</Link>
+            </span>
+          ) : null}</h2>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <div className="tabs" role="tablist" aria-label="榜单周期">
+              {PERIODS.map(([id, label]) => (
+                <button key={id} type="button" role="tab" className="tab" aria-selected={period === id} onClick={() => setPeriod(id)}>{label}</button>
+              ))}
+            </div>
+            <div className="tabs" role="tablist" aria-label="榜单分组">
+              {TABS.map(([id, label]) => (
+                <button key={id} type="button" role="tab" className="tab" aria-selected={tab === id} onClick={() => setTab(id)}>{label}</button>
+              ))}
+            </div>
           </div>
         </div>
         <div className="scroll-x">
           <div className="board-min">
             <div className="board-head">
-              <span>名次</span><span>战队</span><span className="col-spark">走势</span><span className="r">累计收益</span><span className="r col-excess">比沪深300</span><span className="r col-day">今日</span>
+              <span>名次</span><span>战队</span><span className="col-spark">走势</span><span className="r">{period === "month" ? "本月收益" : "赛季收益"}</span><span className="r col-excess">比沪深300</span><span className="r col-day">今日</span>
             </div>
             {rows === null ? <p className="empty">加载中…</p> : null}
-            {rows?.map((r) => <BoardLine key={r.portfolio_id} r={r} />)}
+            {rows?.map((r) => <BoardLine key={r.portfolio_id} r={r} period={period} />)}
           </div>
         </div>
       </section>
@@ -130,9 +145,10 @@ function QueueCard({ q }: { q: OrderView }) {
   );
 }
 
-function BoardLine({ r }: { r: BoardRow }) {
+function BoardLine({ r, period }: { r: BoardRow; period: Period }) {
   const tag = GROUP_TAG[r.group];
   const bench = r.group === "benchmark";
+  const ret = period === "month" ? r.month_return ?? 0 : r.cum_return;
   return (
     <Link href={`/portfolio/${r.portfolio_id}`} className="board-row" style={{ background: bench ? "#1a1c22" : undefined }}>
       <span className="mono bold" style={{ fontSize: 16, color: r.rank === 1 ? "var(--gold)" : "var(--muted)" }}>{r.rank ?? "—"}</span>
@@ -152,7 +168,7 @@ function BoardLine({ r }: { r: BoardRow }) {
         })()}
       </span>
       <span className="col-spark"><Sparkline values={r.spark} color={bench ? "#9aa1ae" : r.cum_return >= 0 ? "#ff6b63" : "#3fcb8a"} dashed={bench} /></span>
-      <span className="r mono bold" style={{ fontSize: 15, color: bench ? "var(--muted)" : upColor(r.cum_return) }}>{pct(r.cum_return)}</span>
+      <span className="r mono bold" style={{ fontSize: 15, color: bench ? "var(--muted)" : upColor(ret) }}>{pct(ret)}</span>
       <span className="r mono col-excess" style={{ color: bench ? "var(--muted)" : upColor(r.excess_return) }}>{bench ? "—" : pct(r.excess_return)}</span>
       <span className="r mono col-day" style={{ color: upColor(r.day_return) }}>{arrow(r.day_return)}{pct(r.day_return)}</span>
     </Link>

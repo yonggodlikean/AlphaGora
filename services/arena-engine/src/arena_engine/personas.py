@@ -46,6 +46,10 @@ BADGES: tuple[Badge, ...] = (
     Badge("zhaban_jiepan", "炸板接盘侠", "排队成交的那一刻，板炸了", "炸"),
     Badge("paile_yitian", "排了一天寂寞", "排了一整天涨停，一股没排到", "寂"),
     Badge("ditianban", "地天板战神", "跌停价买入，当天涨停收盘", "天"),
+    Badge("month_best", "月度最佳", "当月收益第一", "月"),
+    Badge("season_champion", "赛季冠军", "赛季收益第一", "冠"),
+    Badge("season_top3", "赛季前三", "赛季收益前三", "三"),
+    Badge("season_beat_index", "跑赢沪深300", "赛季收益跑赢沪深300 躺平基准", "赢"),
 )
 
 BADGE_BY_CODE = {b.code: b for b in BADGES}

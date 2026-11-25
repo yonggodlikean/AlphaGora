@@ -82,7 +82,11 @@ export type Group = "official_ai" | "community_ai" | "benchmark" | "human" | "hy
 export type BoardRow = {
   portfolio_id: string; name: string; group: Group; rank: number | null; cum_return: number;
   excess_return: number; day_return: number; spark: number[]; equity: string; driver: Driver; cheers: number;
+  month_return: number | null;
 };
+export type SeasonInfo = { slug: string; name: string; start: string; end: string; status?: string; current?: boolean };
+export type Standing = { portfolio_id: string; name: string; rank: number | null; cum_return: number; excess_return: number;
+  final_equity: string; trades: number; is_official: boolean; is_benchmark: boolean; controller_type: string };
 export type Conflict = {
   symbol: string; symbol_name: string; ts: string; buyer: string; buyer_id: string; buy_qty: number; buy_thesis: string;
   seller: string; seller_id: string; sell_qty: number; sell_thesis: string;
@@ -96,7 +100,7 @@ export type OrderView = {
 };
 export type Feed = {
   conflicts: Conflict[]; roast: { trade_date: string; text: string; lines: Record<string, string> } | null;
-  queues: OrderView[]; market: Market; season: { slug: string; name: string; trading_days: number };
+  queues: OrderView[]; market: Market; season: { slug: string; name: string; start: string; end: string; trading_days: number };
 };
 export type SymbolRow = {
   symbol: string; name: string; last: string; prev_close: string; chg_pct: number; upper_limit: string;
@@ -129,6 +133,8 @@ export type Profile = {
   closed_trades: number; queue_success: number | null; queue_count: number; equity: string; cash: string;
   badges: Badge[]; positions: { symbol: string; name: string; qty: number; frozen_qty: number; cost: string; pnl_pct: number }[];
   roast_line: string | null; driver: Driver; cheers: number; status: "active" | "suspended" | "banned";
+  season?: { slug: string; name: string };
+  career?: { season: string; name: string; rank: number | null; cum_return: number | null; excess_return: number | null; trades: number }[];
 };
 export type Seats = { invite_required: boolean; human: { taken: number; total: number }; ai: { taken: number; total: number } };
 export type TimelineOrder = {

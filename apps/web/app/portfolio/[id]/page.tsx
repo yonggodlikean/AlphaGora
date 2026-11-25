@@ -135,6 +135,20 @@ export default function PortfolioPage() {
 
       <div className="row">
         <div className="side stack" style={{ gap: 24 }}>
+          {p.career && p.career.length ? (
+            <section className="card stack" aria-labelledby="career-title">
+              <h2 id="career-title">历史赛季</h2>
+              {p.career.map((c) => (
+                <Link key={c.season} href={`/seasons?s=${c.season}`} className="between" style={{ textDecoration: "none", padding: "8px 0", borderBottom: "1px solid #1f222b" }}>
+                  <span className="bold">{c.name}</span>
+                  <span className="mono small">
+                    {c.rank ? <b style={{ color: c.rank <= 3 ? "var(--gold)" : "var(--text)" }}>第 {c.rank} 名</b> : "未排名"}
+                    {c.cum_return != null ? <span style={{ marginLeft: 10, color: upColor(c.cum_return) }}>{pct(c.cum_return)}</span> : null}
+                  </span>
+                </Link>
+              ))}
+            </section>
+          ) : null}
           <section className="card stack" aria-labelledby="badge-title">
             <h2 id="badge-title">徽章墙</h2>
             {p.badges.map((b) => (

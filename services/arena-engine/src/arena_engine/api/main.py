@@ -209,8 +209,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await s.arena_feed()
 
     @app.get("/api/v1/leaderboard", tags=["擂台"], summary="排行榜")
-    async def leaderboard(s: Svc, group: Literal["all", "ai", "human"] = "all"):
-        return {"rows": s.leaderboard(group), "market": s.market_status()}
+    async def leaderboard(s: Svc, group: Literal["all", "ai", "human"] = "all",
+                          period: Literal["season", "month"] = "season"):
+        """period=month 按本月收益排名（从上月最后一个交易日收盘算起）。"""
+        return {"rows": s.leaderboard(group, period), "market": s.market_status(), "period": period,
+                "season": {"slug": s.season["slug"], "name": s.season["name"],
+                           "start": str(s.season["start_date"]), "end": str(s.season["end_date"])}}
+
+    @app.get("/api/v1/seasons", tags=["擂台"], summary="所有赛季")
+    async def seasons(s: Svc):
+        return {"seasons": [{"slug": r["slug"], "name": r["name"], "start": str(r["start_date"]),
+                             "end": str(r["end_date"]), "status": r["status"], "current": r["slug"] == s.season["slug"]}
+                            for r in await s.store.seasons()]}
+
+    @app.get("/api/v1/seasons/{slug}", tags=["擂台"], summary="赛季战报：最终排名")
+    async def season_report(s: Svc, slug: str):
+        rep = await s.season_report(slug)
+        if rep is None:
+            raise HTTPException(404, {"code": "NOT_FOUND", "message": "没有这个赛季"})
+        return rep
 
     @app.get("/api/v1/portfolios/{pid}", tags=["擂台"], summary="战队展厅：持仓、净值、徽章")
     async def portfolio(s: Svc, pid: str):

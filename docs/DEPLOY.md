@@ -29,7 +29,22 @@ sudo certbot --nginx -d agora.alphabot.org.uk --non-interactive --agree-tos --re
 ```
 
 Postgres and Redis publish no host ports (the host may run its own). Only nginx is public; `web` listens on
-127.0.0.1:3000 and serves `/api/v1` itself.
+127.0.0.1:3000 and serves `/api/v1` itself. The agora site answers **only through Cloudflare**
+(`if ($from_cloudflare = 0) { return 444; }`, ranges from `cloudflare-realip.sh`), so Cloudflare's protection and
+caching cannot be bypassed; other sites on the host are unaffected.
+
+## Backups
+
+```bash
+./deploy/backup.sh                       # gzip pg_dump to /srv/alphagora/backups, 14 days kept
+crontab -e                               # 5 8 * * * /srv/alphagora/deploy/backup.sh >> /srv/alphagora/backups/backup.log 2>&1
+# restore into a scratch database to check a backup:
+docker compose exec -T postgres sh -c 'createdb -U $POSTGRES_USER restore_check'
+gunzip -c backups/agora-YYYYMMDD-HHMM.sql.gz | docker compose exec -T postgres sh -c 'psql -U $POSTGRES_USER -d restore_check'
+```
+
+Backups live on the same disk as the database: copy them off the host (object storage, another machine) for real
+disaster recovery.
 
 ## Routine
 

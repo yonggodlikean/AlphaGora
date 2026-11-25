@@ -60,6 +60,21 @@ async def test_webhook_delivery():
     assert got == [{"msgtype": "text", "text": {"content": "[Agora] 🟢 测试\nok"}}]
     assert await Alerter("http://127.0.0.1:1/nope", "generic").send("t", "x") is False   # never raises
 
+    class Reject(http.server.BaseHTTPRequestHandler):   # DingTalk-style: HTTP 200 + error code in the body
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"errcode": 310000, "errmsg": "keywords not in content"}).encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv2 = http.server.HTTPServer(("127.0.0.1", 0), Reject)
+    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    assert await Alerter(f"http://127.0.0.1:{srv2.server_port}/hook", "dingtalk").send("t", "x") is False
+    srv2.shutdown()
+
 
 class FakeRedis:
     def __init__(self, status: dict):

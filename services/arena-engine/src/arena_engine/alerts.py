@@ -52,7 +52,17 @@ class Alerter:
         req = urllib.request.Request(self.url, data=data, method="POST",
                                      headers={"Content-Type": "application/json", "User-Agent": "agora-alerts/1"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
+            raw = resp.read()
+        # DingTalk / WeCom / Feishu answer HTTP 200 even when they reject a message (keyword or signature rules,
+        # bad token): the verdict is in the body.
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return
+        if isinstance(body, dict):
+            code = body.get("errcode", body.get("code", body.get("StatusCode", 0)))
+            if code not in (0, None, "0"):
+                raise RuntimeError(f"webhook rejected the message: {body.get('errmsg') or body.get('msg') or body}")
 
     async def send(self, title: str, text: str, level: str = "warning") -> bool:
         now = datetime.now(CST)

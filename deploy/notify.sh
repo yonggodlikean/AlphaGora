@@ -20,4 +20,7 @@ body = {"wecom": {"msgtype": "text", "text": {"content": line}},
 print(json.dumps(body, ensure_ascii=False))
 PY
 )
-curl -fsS --max-time 10 -H "Content-Type: application/json" -d "$BODY" "$URL" > /dev/null || echo "notify: webhook failed" >&2
+RESP=$(curl -fsS --max-time 10 -H "Content-Type: application/json" -d "$BODY" "$URL") || { echo "notify: webhook failed" >&2; exit 1; }
+# DingTalk / WeCom / Feishu return HTTP 200 with an error code in the body when they reject a message
+echo "$RESP" | grep -Eq '"(errcode|code|StatusCode)":[[:space:]]*[1-9]' && { echo "notify: webhook rejected: $RESP" >&2; exit 1; }
+exit 0

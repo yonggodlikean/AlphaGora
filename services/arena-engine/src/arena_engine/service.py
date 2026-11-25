@@ -82,6 +82,7 @@ class ArenaService:
         self._conflicts_seen: dict[tuple, datetime] = {}
         self._first_trade_done: set[str] = set()
         self._closed_dates: set[date] = set()
+        self._late_dates: set[date] = set()
         self._last_bot_minute: tuple | None = None
         self._token_cache: dict[bytes, str] = {}
         self._summaries: dict[str, str] = {}
@@ -256,6 +257,14 @@ class ArenaService:
         async with self.lock:
             d = self.calendar.trade_date_of(snap.ts)
             if d in self._closed_dates or (self.engine.trade_date and d < self.engine.trade_date):
+                return
+            if (not self.settings.is_simulated_clock and (self.engine.trade_date != d or not self.engine.day_open)
+                    and datetime.now(CST) > datetime.combine(d, time(15, 0, 5), CST)):
+                # Live mode: never open a trading day after its close (late, replayed or test quotes would
+                # otherwise create an empty "day" that opens and closes at once).
+                if d not in self._late_dates:
+                    self._late_dates.add(d)
+                    log.warning("ignoring quotes for %s: they arrived after that day's close", d)
                 return
             if self.engine.trade_date != d or not self.engine.day_open:
                 if self.engine.day_open:

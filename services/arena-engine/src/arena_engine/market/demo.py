@@ -118,7 +118,7 @@ class DemoMarket:
                     p = float(upper) - rng.randint(1, 15) * 0.01
                 else:
                     p *= 1 + rng.gauss(-0.0003, 0.0015)
-                p = min(p, float(upper) - 0.01)
+                p = max(lo_cap, min(p, float(upper) - 0.01))   # after a break it may sink, never below the limit
             else:
                 p *= 1 + drift + rng.gauss(0, sigma)
                 p = max(lo_cap, min(hi_cap, p))
@@ -134,8 +134,8 @@ class DemoMarket:
                 asks = [Level(bid1 + TICK * (k + 1), rng.randint(10, 600) * 100) for k in range(5)]
                 if role == "dragon" and break_at <= i < break_at + break_len:
                     asks[0] = Level(asks[0].price, rng.randint(2000, 8000) * 100)  # sellers dumping at the top
-                bids = [lv for lv in bids if lv.price >= lower]
-                asks = [lv for lv in asks if lv.price <= upper]
+                bids = [lv for lv in bids if lower <= lv.price <= upper]
+                asks = [lv for lv in asks if lower <= lv.price <= upper]
             out.append(L1Snapshot(
                 symbol=sym, ts=ts, seq=i + 1, bids=tuple(bids), asks=tuple(asks), last_price=last,
                 cumulative_volume=cum, upper_limit=upper, lower_limit=lower, prev_close=prev,

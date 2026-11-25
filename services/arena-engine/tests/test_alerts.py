@@ -125,3 +125,21 @@ async def test_health_checks(dsn):
     await service.check_health(now)
     assert titles()[-1].startswith("磁盘使用率")
     await client.aclose(); await service.stop(); await pool.close()
+
+
+
+@pytest.mark.anyio
+async def test_live_mode_never_opens_a_day_after_its_close(dsn):
+    from datetime import date
+
+    from arena_engine.market.demo import DemoMarket
+    service, client, pool = await boot(dsn)
+    service.settings = dataclasses.replace(service.settings, market_feed="redis")   # wall clock
+    day = datetime.now(CST).date() - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    for snap in DemoMarket(seed=1).day(day)[-1]:          # the 15:00 quotes of a day that is already over
+        await service.on_snapshot(snap)
+    assert not service.engine.day_open and service.engine.trade_date is None
+    assert not await service.store.has_market_open(service.season_id, day)
+    await client.aclose(); await service.stop(); await pool.close()

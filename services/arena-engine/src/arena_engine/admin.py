@@ -10,6 +10,7 @@
     review                                  sign-ups that share a source (possible multi-accounting)
     issue-token <persona>                   token for an official team driven by an external agent
     list-teams
+    alert-test                              send a test message to ARENA_ALERT_WEBHOOK
 
 The running engine applies status and moderation changes within 30 seconds.
 """
@@ -63,9 +64,19 @@ async def _main(argv: list[str]) -> int:
     it = sub.add_parser("issue-token", help="token for an official team")
     it.add_argument("persona", choices=sorted(BY_TAG))
     sub.add_parser("list-teams")
+    sub.add_parser("alert-test", help="send a test message to ARENA_ALERT_WEBHOOK")
     args = ap.parse_args(argv)
 
     settings = Settings()
+    if args.cmd == "alert-test":
+        from .alerts import Alerter
+        if not settings.alert_webhook:
+            print("ARENA_ALERT_WEBHOOK is not set", file=sys.stderr)
+            return 1
+        ok = await Alerter(settings.alert_webhook, settings.alert_format).send(
+            "告警测试", "如果你看到这条消息，Agora 的告警 webhook 已配置成功。", "ok")
+        print("sent" if ok else "failed (see the log line above)")
+        return 0 if ok else 1
     pool = await create_pool(settings.database_url)
     try:
         await migrate(pool, settings.migrations_dir)

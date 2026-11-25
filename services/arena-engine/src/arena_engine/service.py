@@ -11,7 +11,9 @@ import hashlib
 import hmac
 import logging
 import math
+import re
 import secrets
+import shutil
 import uuid
 from collections import deque
 from pathlib import Path
@@ -34,6 +36,7 @@ from .market.feed import RedisStreamFeed, ReplayFeed
 from .market.snapshot import L1Snapshot
 from .matching.rate_limit import SlidingWindowLimiter
 from .moderation import ContentFilter
+from .alerts import Alerter
 from .matching import AShareMatchingEngine
 from .matching.fees import money
 from .personas import BADGE_BY_CODE, BADGES, BY_TAG
@@ -93,6 +96,8 @@ class ArenaService:
         self._cheer_ip: dict[str, tuple[date, int]] = {}
         self._order_day: dict[str, tuple[date, int]] = {}
         self._limiters: dict[int, SlidingWindowLimiter] = {}
+        self.alerter = Alerter(settings.alert_webhook, settings.alert_format, timedelta(minutes=settings.alert_repeat_min))
+        self._redis = None   # the quote stream's client (live mode), also used to read the gateway heartbeat
         self.last_seen: dict[str, tuple[datetime, str | None]] = {}
         self._last_seen_written: dict[str, datetime] = {}   # house order id -> decision summary (for conflict cards)
         self._join_hits: dict[str, deque] = {}
@@ -174,6 +179,7 @@ class ArenaService:
             client = aioredis.from_url(s.redis_url, socket_timeout=30, socket_connect_timeout=10,
                                        health_check_interval=30)
             self.feed = RedisStreamFeed(client, stream=s.market_stream, block_ms=5000)
+            self._redis = client
         else:
             self.feed = None
         if self.feed is not None:
@@ -332,6 +338,7 @@ class ArenaService:
             await asyncio.sleep(30)
             try:
                 await self.refresh_controls()
+                await self.check_health()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -361,6 +368,43 @@ class ArenaService:
         if self._visitors_day and len(self._visitors) != self._visitors_saved:
             await self.store.save_visits(self._visitors_day, len(self._visitors))
             self._visitors_saved = len(self._visitors)
+
+    async def check_health(self, now: datetime | None = None) -> None:
+        """Raises / clears alerts. Gateway liveness and the trading-session flag come from the gateway itself
+        (it knows the exchange holidays), so nothing fires on a holiday or at night."""
+        now = now or datetime.now(CST)
+        if self.settings.market_feed == "redis" and self._redis is not None:
+            try:
+                raw = await self._redis.hgetall("md:status")
+                status = {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+                          for k, v in raw.items()}
+            except Exception as exc:
+                status = {}
+                log.warning("cannot read md:status: %s", exc)
+            hb = _parse_ts(status.get("heartbeat"))
+            down = hb is None or (now - hb).total_seconds() > 120
+            await self.alerter.update(
+                "gateway_down", down, "行情网关无响应",
+                "market-gateway 超过 2 分钟没有心跳。检查：docker compose logs --tail 50 market-gateway", "critical")
+            last = _parse_ts(status.get("last_publish"))
+            stalled = not down and status.get("session") == "1" and (last is None or (now - last).total_seconds() > 90)
+            await self.alerter.update(
+                "feed_stalled", stalled, "交易时段行情断流",
+                f"网关在线，但超过 90 秒没有新行情（最后一次：{last.strftime('%H:%M:%S') if last else '今天还没有'}）。"
+                "可能是通达信服务器不可达。", "critical")
+        for pid, m in self.meta.items():
+            if m.is_official and m.persona_tag in self.settings.resolved_external_teams():
+                d = self.driver(pid)
+                seen = d.get("last_seen") if d else None
+                await self.alerter.update(
+                    f"team_offline:{pid}", bool(d) and not d["online"], f"{m.name} 掉线",
+                    f"驱动程序超过 {self.settings.online_window_s // 60} 分钟没有心跳"
+                    f"（最后在线：{seen[11:19] if seen else '从未上线'}）。检查：docker compose logs --tail 50 pup-team")
+        usage = shutil.disk_usage("/")
+        pct = usage.used * 100 // usage.total
+        await self.alerter.update(
+            "disk_high", pct >= self.settings.alert_disk_pct, f"磁盘使用率 {pct}%",
+            f"剩余 {usage.free // 2**30} GB。行情录像在 data/tape（保留 TAPE_KEEP_DAYS 天），备份在 backups/。")
 
     def is_active(self, pid: str) -> bool:
         return self.status.get(pid, ("active", None))[0] == "active"
@@ -1001,3 +1045,13 @@ def _row_view(r: asyncpg.Record) -> dict:
             "status": r["status"], "queue_initial": r["queue_initial"], "queue_ahead": r["queue_ahead"],
             "queue_progress_pct": None, "debate_id": None if r["debate_id"] is None else str(r["debate_id"]),
             "thesis": r["thesis"]}
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """RFC 3339 from the gateway (chrono writes up to 9 fractional digits; Python takes 6)."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", value))
+    except ValueError:
+        return None

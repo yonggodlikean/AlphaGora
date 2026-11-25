@@ -369,6 +369,19 @@ impl Sink {
         Ok(())
     }
 
+    /// Liveness for the engine's alerting: written every loop, also outside trading hours. `session` is the
+    /// gateway's own view (rustdx holiday calendar), so the engine never alarms on a holiday.
+    fn heartbeat(&mut self, session: bool) {
+        let result: redis::RedisResult<()> = self.redis().and_then(|c| {
+            redis::cmd("HSET").arg("md:status").arg("heartbeat").arg(cst_now().to_rfc3339())
+                .arg("session").arg(if session { "1" } else { "0" }).query(c).map_err(Into::into)
+        }).map_err(|e| redis::RedisError::from((redis::ErrorKind::IoError, "heartbeat", e.to_string())));
+        if let Err(e) = result {
+            self.conn = None;
+            debug!("heartbeat: {e}");
+        }
+    }
+
     fn write_tape(&mut self, date: NaiveDate, lines: &[String]) -> Result<()> {
         let Some(dir) = self.tape_dir.clone() else { return Ok(()) };
         if self.tape.as_ref().map(|(d, _)| *d) != Some(date) {
@@ -425,12 +438,17 @@ fn main() -> Result<()> {
     let mut pool: Option<Pool> = None;
     let mut universe_date: Option<NaiveDate> = None;
     let mut stats_at = Instant::now();
+    let mut last_heartbeat = Instant::now() - Duration::from_secs(60);
     let (mut published, mut worst) = (0u64, Duration::ZERO);
     let mut skips: HashMap<String, u64> = HashMap::new();
 
     loop {
         let now = cst_now();
         let date = now.date_naive();
+        if last_heartbeat.elapsed() >= Duration::from_secs(10) {
+            sink.heartbeat(session_now(&cfg));
+            last_heartbeat = Instant::now();
+        }
         if !session_now(&cfg) {
             if let Some(p) = pool.take() {
                 info!("session over: stopping workers (published {published} snapshots, skips {skips:?})");

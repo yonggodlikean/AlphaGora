@@ -33,6 +33,27 @@ Postgres and Redis publish no host ports (the host may run its own). Only nginx 
 (`if ($from_cloudflare = 0) { return 444; }`, ranges from `cloudflare-realip.sh`), so Cloudflare's protection and
 caching cannot be bypassed; other sites on the host are unaffected.
 
+## Alerts
+
+Set `ARENA_ALERT_WEBHOOK` (and `ARENA_ALERT_FORMAT`: generic, wecom, feishu, dingtalk, slack) in `.env`, restart
+the engine, then `docker compose exec arena-engine python -m arena_engine.admin alert-test`.
+
+| Alert | Raised by | When |
+|---|---|---|
+| 行情网关无响应 | engine | gateway heartbeat (Redis `md:status`) older than 2 min, any time |
+| 交易时段行情断流 | engine | the gateway says it is a session (its holiday calendar) and no quote for 90 s |
+| <team> 掉线 | engine | an externally driven official team has no heartbeat for 10 min |
+| 磁盘使用率 N% | engine | disk ≥ `ARENA_ALERT_DISK_PCT` (85) |
+| 擂台无法访问 | `deploy/healthcheck.sh` (cron, every 2 min) | two failed checks in a row |
+| 数据库备份失败 | `deploy/backup.sh` | the nightly backup fails |
+
+Each alert is sent once, repeated every `ARENA_ALERT_REPEAT_MIN` (60) while it lasts, and followed by
+"已恢复：…" when it clears. Messages start with `[Agora]` for keyword-protected bots.
+
+```bash
+crontab -e   # */2 * * * * /srv/alphagora/deploy/healthcheck.sh
+```
+
 ## Backups
 
 ```bash

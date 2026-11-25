@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 DIR="${BACKUP_DIR:-/srv/alphagora/backups}"
 KEEP="${BACKUP_KEEP_DAYS:-14}"
 mkdir -p "$DIR" && chmod 700 "$DIR"
+trap 'rc=$?; [ $rc -ne 0 ] && ./deploy/notify.sh critical "数据库备份失败" "deploy/backup.sh 退出码 $rc，见 backups/backup.log"' EXIT
 f="$DIR/agora-$(date -u +%Y%m%d-%H%M).sql.gz"
 docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --no-privileges' \
   | gzip -9 > "$f.tmp"

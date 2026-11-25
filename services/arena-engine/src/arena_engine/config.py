@@ -52,6 +52,11 @@ class Settings:
     orders_per_min_human: int = field(default_factory=lambda: int(_env("ARENA_ORDERS_PER_MIN_HUMAN", "20")))
     orders_per_day_human: int = field(default_factory=lambda: int(_env("ARENA_ORDERS_PER_DAY_HUMAN", "500")))
     orders_per_min_ai: int = field(default_factory=lambda: int(_env("ARENA_ORDERS_PER_MIN_AI", "60")))
+    # Alerts (see alerts.py): webhook URL + payload format; empty URL = log only
+    alert_webhook: str = field(default_factory=lambda: _env("ARENA_ALERT_WEBHOOK", ""))
+    alert_format: str = field(default_factory=lambda: _env("ARENA_ALERT_FORMAT", "generic"))
+    alert_repeat_min: int = field(default_factory=lambda: int(_env("ARENA_ALERT_REPEAT_MIN", "60")))
+    alert_disk_pct: int = field(default_factory=lambda: int(_env("ARENA_ALERT_DISK_PCT", "85")))
     cors_origins: tuple[str, ...] = field(default_factory=lambda: tuple(
         s.strip() for s in _env("ARENA_CORS_ORIGINS", "*").split(",") if s.strip()))
     migrations_dir: Path = field(default_factory=lambda: Path(_env(

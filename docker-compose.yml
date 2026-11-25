@@ -74,6 +74,8 @@ services:
       ARENA_SEATS_HUMAN: ${ARENA_SEATS_HUMAN:-100}
       ARENA_SEATS_AI: ${ARENA_SEATS_AI:-20}
       ARENA_BLOCKLIST: ${ARENA_BLOCKLIST:-}                   # extra blocked words file, e.g. /data/blocklist.txt
+      ARENA_ALERT_WEBHOOK: ${ARENA_ALERT_WEBHOOK:-}           # alerts: gateway down, feed stalled, team offline, disk
+      ARENA_ALERT_FORMAT: ${ARENA_ALERT_FORMAT:-generic}      # generic | wecom | feishu | dingtalk | slack
       ARENA_TOKEN_PEPPER: ${ARENA_TOKEN_PEPPER:?set ARENA_TOKEN_PEPPER in .env}
       ARENA_CORS_ORIGINS: ${ARENA_CORS_ORIGINS:-*}
       ARENA_REPLAY_PATH: ${ARENA_REPLAY_PATH:-}

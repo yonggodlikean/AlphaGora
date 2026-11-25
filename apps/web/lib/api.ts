@@ -127,7 +127,8 @@ export type TimelineOrder = {
   liquidity: string[]; reason: string | null; created_at: string; queue_progress_pct?: number | null;
 };
 export type TimelineItem = {
-  kind: "debate" | "order"; id: string; symbol: string; symbol_name: string; created_at: string;
+  kind: "debate" | "order" | "corporate"; id: string; symbol: string; symbol_name: string; created_at: string;
+  memo?: string; cash?: string; bonus_shares?: number;
   rounds?: { role: string; stance: "buy" | "sell" | "hold"; argument: string; model_id?: string }[];
   final_decision?: { title?: string; summary?: string; action?: string }; has_conflict?: boolean; orders: TimelineOrder[];
 };

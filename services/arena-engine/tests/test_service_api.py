@@ -183,14 +183,43 @@ async def test_full_day_join_trade_close_and_restart(dsn):
     assert (await client2.get("/api/v1/market/symbols")).json()["total"] == n_symbols
     r = await client2.post("/api/v1/agent/orders", json=order, headers=auth)
     assert r.json()["duplicate"] is True             # idempotency survives restarts (DB-backed)
+    # DAY2 is the bank's ex-date: 10 派 3 元 + 10 送 5 股 for the 1,000 shares held at the close
+    from arena_engine.market.history import History
+    service2.daily = History.synthetic({"999002.SH": 5.2}, DAY2)
+    b = service2.daily.bars["999002.SH"]
+    service2.daily.bars["999002.SH"] = type(b)(b.dates, b.close, b.high, b.low, b.volume, b.amount, b.limit_up,
+                                                b.div_ttm, b.float_shares, ((20261127, 3.0, 5.0),))
+    cash_before_xd = service2.engine.account(pid).cash
     day2 = market.day(DAY2)
     await play(service2, day2, 0, 30)
+    acct = service2.engine.account(pid)
+    pos = acct.positions["999002.SH"]
+    assert acct.cash == cash_before_xd + Decimal("300.00")
+    assert (pos.qty, pos.frozen_qty, pos.sellable_qty) == (1500, 500, 1000)       # bonus shares locked today
+    async with pool2.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT count(*) FROM ledger_journals WHERE ref_type = 'corporate_action' AND portfolio_id = $1",
+            uuid.UUID(pid)) == 1
+        assert await conn.fetchval("SELECT qty FROM positions WHERE portfolio_id = $1 AND symbol = '999002.SH'",
+                                   uuid.UUID(pid)) == 1500
+        unbalanced = await conn.fetchval(
+            "SELECT count(*) FROM (SELECT journal_id FROM ledger_entries GROUP BY journal_id HAVING sum(amount) <> 0) x")
+    assert unbalanced == 0
+    from arena_engine import corporate
+    again = corporate.plan(service2.engine.accounts, service2.daily, DAY2)
+    assert again and await service2.store.apply_corporate_actions(again, {}, service2.balances) == []  # never twice
+    ev = [e for e in await service2.store.events_after(service2.season_id, 0) if e["type"] == "corporate.action"]
+    assert any(e["data"]["portfolio_id"] == pid and e["data"]["cash"] == "300.00" for e in ev)
+    tl = (await client2.get(f"/api/v1/portfolios/{pid}/timeline")).json()["items"]
+    xd = next(i for i in tl if i["kind"] == "corporate")
+    assert xd["symbol"] == "999002.SH" and xd["cash"] == "300.00" and xd["bonus_shares"] == 500
+    assert "10 派 3" in xd["memo"] and "10 送转 5" in xd["memo"]
     snap = (await client2.get("/api/v1/market/snapshot", params={"symbols": "999002.SH"})).json()["snapshots"][0]
     sell = await client2.post("/api/v1/agent/orders", headers=auth, json={
         "idempotency_key": "human-0005", "symbol": "999002.SH", "side": "sell", "price": snap["bids"][0][0],
         "qty": 1000, "thesis": "T+1 到了，落袋"})
     assert sell.status_code == 201 and sell.json()["status"] == "filled", sell.text
-    assert service2.engine.account(pid).positions["999002.SH"].qty == 0
+    assert service2.engine.account(pid).positions["999002.SH"].qty == 500           # the bonus shares remain
     await client2.aclose()
     await service2.stop()
     await pool2.close()

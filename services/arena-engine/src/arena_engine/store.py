@@ -11,8 +11,8 @@ from typing import Any
 
 import asyncpg
 
-from .domain.models import Fill, Order, Position
-from .ledger.journal import Journal, fill_journal, funding_journal
+from .domain.models import ZERO, Fill, Order, Position
+from .ledger.journal import Journal, Posting, fill_journal, funding_journal
 from .domain.errors import PublicError
 from .personas import PERSONAS
 
@@ -459,14 +459,39 @@ class Store:
                                 journal_id=jid, ref_id=jid)
             return True
 
+    async def apply_corporate_actions(self, actions, positions: dict[tuple[str, str], tuple[int, int, Decimal]],
+                                      balances: dict[tuple[str, str, str | None], Decimal]) -> list:
+        """Journals each action once (its id is deterministic) and writes the resulting positions, in one
+        transaction. Returns the actions that were new."""
+        applied = []
+        async with self.pool.acquire() as conn, conn.transaction():
+            for a in actions:
+                if await conn.fetchval("SELECT 1 FROM ledger_journals WHERE id = $1", a.id):
+                    continue
+                postings = []
+                if a.cash > 0:
+                    postings += [Posting("cash", a.cash), Posting("realized_pnl", -a.cash)]
+                if a.bonus:
+                    postings.append(Posting("position", ZERO, a.symbol, a.bonus))
+                j = Journal("adjustment", "corporate_action", str(a.id), a.portfolio_id, tuple(postings))
+                await self._journal(conn, j, balances, journal_id=a.id, ref_id=a.id,
+                                    memo=f"除权除息 {a.symbol} {a.describe()}（持有 {a.held} 股）")
+                qty, frozen, cost = positions[(a.portfolio_id, a.symbol)]
+                await conn.execute(
+                    "UPDATE positions SET qty = $3, frozen_qty = $4, cost_basis = $5, updated_at = now() "
+                    "WHERE portfolio_id = $1 AND symbol = $2", uuid.UUID(a.portfolio_id), a.symbol, qty, frozen, cost)
+                applied.append(a)
+        return applied
+
     async def _journal(self, conn: asyncpg.Connection, j: Journal,
                        balances: dict[tuple[str, str, str | None], Decimal],
-                       journal_id: uuid.UUID | None = None, ref_id: uuid.UUID | None = None) -> None:
+                       journal_id: uuid.UUID | None = None, ref_id: uuid.UUID | None = None,
+                       memo: str | None = None) -> None:
         jid = journal_id or uuid.uuid4()
         await conn.execute(
-            "INSERT INTO ledger_journals (id, portfolio_id, entry_type, ref_type, ref_id) "
-            "VALUES ($1, $2, $3::ledger_entry_type, $4, $5)",
-            jid, uuid.UUID(j.portfolio_id), j.entry_type, j.ref_type, ref_id or uuid.UUID(j.ref_id))
+            "INSERT INTO ledger_journals (id, portfolio_id, entry_type, ref_type, ref_id, memo) "
+            "VALUES ($1, $2, $3::ledger_entry_type, $4, $5, $6)",
+            jid, uuid.UUID(j.portfolio_id), j.entry_type, j.ref_type, ref_id or uuid.UUID(j.ref_id), memo)
         for p in j.postings:
             key = (j.portfolio_id, p.account, p.symbol)
             bal = balances.get(key, ZERO) + p.amount
@@ -567,6 +592,19 @@ class Store:
         for o in loose:
             items.append({"kind": "order", "id": str(o["id"]), "symbol": o["symbol"], "created_at": o["created_at"],
                           "orders": [_order_row(o)]})
+        actions = await self.pool.fetch(
+            """SELECT j.id, j.memo, j.created_at,
+                      COALESCE(sum(e.amount) FILTER (WHERE e.account = 'cash'), 0) AS cash,
+                      COALESCE(sum(e.qty_delta) FILTER (WHERE e.account = 'position'), 0) AS bonus,
+                      max(e.symbol) FILTER (WHERE e.account = 'position') AS pos_symbol
+               FROM ledger_journals j JOIN ledger_entries e ON e.journal_id = j.id
+               WHERE j.portfolio_id = $1 AND j.ref_type = 'corporate_action'
+               GROUP BY j.id ORDER BY j.created_at DESC LIMIT $2""", pid, limit)
+        for a in actions:
+            words = (a["memo"] or "").split(" ")       # "除权除息 600000.SH 10 派 3（持有 1000 股）"
+            symbol = a["pos_symbol"] or (words[1] if len(words) > 1 else "")
+            items.append({"kind": "corporate", "id": str(a["id"]), "symbol": symbol or "", "created_at": a["created_at"],
+                          "memo": a["memo"], "cash": str(a["cash"]), "bonus_shares": int(a["bonus"]), "orders": []})
         items.sort(key=lambda x: x["created_at"], reverse=True)
         for it in items:
             it["created_at"] = it["created_at"].isoformat()

@@ -169,6 +169,20 @@ export default function PortfolioPage() {
           </div>
           {items && items.length === 0 ? <p className="empty">还没有任何决定。</p> : null}
           {items?.map((it) => {
+            if (it.kind === "corporate") {
+              const got = [Number(it.cash) > 0 ? `现金 ¥${Number(it.cash).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}` : "",
+                it.bonus_shares ? `送转 ${it.bonus_shares.toLocaleString("zh-CN")} 股（明天可卖）` : ""].filter(Boolean).join(" · ");
+              return (
+                <article key={it.id} style={{ border: "1px solid var(--line)", borderRadius: 12, background: "var(--panel-2)", padding: "14px 16px" }} className="stack">
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                    <span className="mono small muted">{mmdd(it.created_at)} {hhmm(it.created_at).slice(0, 5)}</span>
+                    <span className="bold" style={{ fontSize: 15 }}>{it.symbol_name}：除权除息</span>
+                    <span className="pill pill-gold">到账</span>
+                  </div>
+                  <p style={{ margin: 0, color: "var(--text-2)" }}>{it.memo}{got ? `，${got}` : ""}</p>
+                </article>
+              );
+            }
             const out = outcome(it.orders);
             const title = it.kind === "debate"
               ? it.final_decision?.title || `${it.symbol_name}：${STANCE[it.final_decision?.action ?? ""] ?? "讨论"}`

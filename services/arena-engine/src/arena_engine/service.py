@@ -31,6 +31,7 @@ from .domain.enums import ControllerType, Liquidity, OrderStatus, OrderType, Rej
 from .domain.errors import ArenaError, MarketDataError, OrderRejected, PublicError
 from .domain.events import ArenaEvent
 from .domain.models import Fill, Order, OrderRequest, Position
+from . import corporate
 from .house_bots import HouseBots, Intent, MarketView, is_stock as is_stock_symbol
 from .market.history import History, features as hist_features
 from .market.calendar import CST, TradingCalendar
@@ -326,6 +327,7 @@ class ArenaService:
             events = self.engine.resume_trading_day(d, now)
         else:
             events = self.engine.begin_trading_day(d, now)
+            await self._corporate_actions(d)
         await self._restore_open_orders(d if resumed else None)
         self.day_open_px.clear()
         self.minute_closes.clear()
@@ -559,6 +561,27 @@ class ArenaService:
                                     float(b.cumulative_volume), float(b.cumulative_volume * b.last_price),
                                     b.limit_up_sealed)
 
+    async def _corporate_actions(self, d: date) -> None:
+        """Ex-date: pay dividends and bonus shares to positions held at the previous close (before any trading)."""
+        if self.settings.market_feed == "redis" and self._redis is not None:
+            await self.refresh_history()            # make sure this morning's ex-rights list is loaded
+        actions = corporate.plan(self.engine.accounts, self.daily, d)
+        if not actions:
+            return
+        after = {}
+        for a in actions:
+            p = self.engine.accounts[a.portfolio_id].positions[a.symbol]
+            after[(a.portfolio_id, a.symbol)] = (p.qty + a.bonus, p.frozen_qty + a.bonus, p.cost_basis)
+        applied = await self.store.apply_corporate_actions(actions, after, self.balances)
+        for a in applied:
+            corporate.apply_to_engine(self.engine.accounts, a)
+            await self._emit("corporate.action", a.symbol, {
+                "portfolio_id": a.portfolio_id, "portfolio": self._name(a.portfolio_id), "symbol": a.symbol,
+                "name": self.names.get(a.symbol, a.symbol), "ex_date": d.isoformat(), "held": a.held,
+                "plan": a.describe(), "cash": str(a.cash), "bonus_shares": a.bonus})
+        if applied:
+            log.info("corporate actions on %s: %d applied", d, len(applied))
+
     async def refresh_held_days(self, today: date | None = None) -> None:
         """Trading days each house position has been held (bought yesterday = 1)."""
         today = today or self.engine.trade_date or datetime.now(CST).date()
@@ -585,7 +608,7 @@ class ArenaService:
             if not self.engine.day_open and hist.close:     # after the close, the last bar is today
                 hist = type(hist)(hist.dates[:-1], hist.close[:-1], hist.high[:-1], hist.low[:-1],
                                   hist.volume[:-1], hist.amount[:-1], hist.limit_up[:-1], hist.div_ttm,
-                                  hist.float_shares)
+                                  hist.float_shares, hist.events)
             if hist.close and live > 0:
                 out[sym] = hist_features(hist, live)
         return out

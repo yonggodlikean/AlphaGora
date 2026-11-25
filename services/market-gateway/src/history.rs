@@ -7,7 +7,10 @@
 //!
 //! Redis layout (all JSON, columnar to stay small):
 //!   md:hist        hash  symbol -> {"d":[yyyymmdd…],"o","h","l","c","v"(shares),"a"(yuan),"lu":[0|1…],
-//!                                   "div_ttm": yuan/share, "float_shares": shares}
+//!                                   "div_ttm": yuan/share, "float_shares": shares,
+//!                                   "xd":[[yyyymmdd, cash per 10 shares, bonus+transfer shares per 10]…]}
+//!                  `xd` lists ex-rights events from a year back up to any already announced: the engine credits
+//!                  dividends and bonus shares to holders on the ex-date.
 //!   md:hist:meta   string {"date","built_at","symbols","failed","members":{index:[symbols]},
 //!                          "indices":{code:{"d","c","up","down"}}}
 //!
@@ -44,6 +47,7 @@ pub struct Hist {
     pub lu: Vec<u8>,
     pub div_ttm: f64,
     pub float_shares: f64,
+    pub xd: Vec<(u32, f64, f64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +115,8 @@ pub fn build_hist(raw: &[RawBar], xdxr: &[XdxrData], board: Option<Board>, st: b
         lu,
         div_ttm: round4(div_ttm) + 0.0,   // an empty f64 sum is -0.0
         float_shares: float_shares.round(),
+        xd: events.iter().filter(|e| e.date > year_ago && (e.fh_qltp > 0.0 || e.sg_hltp > 0.0))
+            .map(|e| (e.date, round4(e.fh_qltp as f64), round4(e.sg_hltp as f64))).collect(),
     }
 }
 
@@ -257,6 +263,7 @@ mod tests {
         assert_eq!(h.c, vec![9.0, 9.0, 9.0, 9.9]);          // no fake -10% on the ex-dividend day
         assert_eq!(h.lu, vec![0, 0, 0, 1]);
         assert!((h.div_ttm - 1.0).abs() < 1e-9);
+        assert_eq!(h.xd, vec![(20261124, 10.0, 0.0)]);
         assert_eq!(h.v[0], 100_000.0);
     }
 

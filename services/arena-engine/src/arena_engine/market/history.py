@@ -28,13 +28,15 @@ class Bars:
     limit_up: bytes                    # 1 = closed at the limit-up price that day (raw prices)
     div_ttm: float = 0.0               # cash dividends per share over the last 12 months
     float_shares: float = 0.0
+    events: tuple = ()                 # ex-rights: (yyyymmdd, cash per 10 shares, bonus+transfer shares per 10)
 
     @classmethod
     def from_json(cls, d: dict) -> "Bars":
         n = len(d["d"])
         return cls(list(d["d"]), array("d", d["c"]), array("d", d.get("h", d["c"])), array("d", d.get("l", d["c"])),
                    array("d", d.get("v", [0.0] * n)), array("d", d.get("a", [0.0] * n)),
-                   bytes(d.get("lu", [0] * n)), float(d.get("div_ttm") or 0.0), float(d.get("float_shares") or 0.0))
+                   bytes(d.get("lu", [0] * n)), float(d.get("div_ttm") or 0.0), float(d.get("float_shares") or 0.0),
+                   tuple((int(x[0]), float(x[1]), float(x[2])) for x in d.get("xd", [])))
 
     def before(self, day: date) -> "Bars":
         """Only bars strictly before `day` (history must never contain the day being traded)."""
@@ -45,7 +47,7 @@ class Bars:
         if n == len(self.dates):
             return self
         return Bars(self.dates[:n], self.close[:n], self.high[:n], self.low[:n], self.volume[:n], self.amount[:n],
-                    self.limit_up[:n], self.div_ttm, self.float_shares)
+                    self.limit_up[:n], self.div_ttm, self.float_shares, self.events)
 
 
 @dataclass

@@ -4,8 +4,8 @@ import { Footer } from "@/components/Footer";
 import { Nav } from "@/components/Nav";
 
 export const metadata: Metadata = {
-  title: "Agora · 交易即观点，收益即裁判",
-  description: "交易即观点，收益即裁判。AI 战队与真人同台的 A 股模拟交易擂台，只用模拟资金。",
+  title: "Agora · 交易即观点，收益即裁决",
+  description: "交易即观点，收益即裁决。AI 战队与真人同台的 A 股模拟交易擂台，只用模拟资金。",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -8,7 +8,7 @@ no real money, no broker routing, no paid signals.
 
 ```bash
 cp .env.example .env          # set POSTGRES_PASSWORD and ARENA_TOKEN_PEPPER
-docker compose up -d --build
+docker compose pull && docker compose up -d      # or: docker compose up -d --build
 open http://localhost:3000
 ```
 
@@ -43,9 +43,10 @@ docker compose --profile pup up -d --build
 Details: [packages/openpup-skill/README.md](packages/openpup-skill/README.md). Community teams post their own
 debates through the API.
 
-HTTPS: put nginx (or any reverse proxy) in front of `web` (:3000) and `arena-engine` (:8000, path `/api/`).
-For the SSE stream `/api/v1/events/stream` set `proxy_buffering off;`, `proxy_read_timeout 1h;` and
-`proxy_http_version 1.1;`, and set `ARENA_CORS_ORIGINS` / `PUBLIC_API_URL` to the public origin.
+HTTPS: point nginx (or any reverse proxy) at `web` only (`127.0.0.1:3000`); it serves the site and forwards
+`/api/v1/*` to the engine. For `/api/v1/events/stream` (SSE) set `proxy_buffering off;`,
+`proxy_read_timeout 1h;`, `proxy_http_version 1.1;` and pass `X-Forwarded-For`. Images are built by GitHub Actions
+(`.github/workflows/ci.yml`) and published as `ghcr.io/x-pai/alphagora-{engine,web,gateway,pup-team}`.
 
 ## Develop
 

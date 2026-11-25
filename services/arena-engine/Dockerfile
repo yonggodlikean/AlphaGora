@@ -10,4 +10,5 @@ COPY db/migrations ./db/migrations
 RUN useradd --system --uid 10001 arena
 USER arena
 EXPOSE 8000
-CMD ["uvicorn", "arena_engine.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+# Only reachable from the compose network (web, pup-team): trust their X-Forwarded-For for per-visitor limits.
+CMD ["uvicorn", "arena_engine.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

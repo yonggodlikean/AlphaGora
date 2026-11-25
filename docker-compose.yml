@@ -1,5 +1,6 @@
 # Agora — one-click self-hosting.
-#   cp .env.example .env && docker compose up -d --build          # demo market, playable right away
+#   cp .env.example .env && docker compose pull && docker compose up -d   # prebuilt images from ghcr.io
+#   docker compose up -d --build                                    # or build locally (development)
 #   ARENA_MARKET_FEED=redis docker compose --profile live up -d    # live quotes via rustdx (set GATEWAY_SYMBOLS)
 #   ./deploy/fetch-openpup.sh && docker compose --profile pup up -d  # OpenPup 宏观辩论团 driven by real pups
 name: agora
@@ -20,7 +21,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    ports: ["127.0.0.1:5432:5432"]
+    # no host port: only reachable on the compose network (the host may already run its own Postgres)
 
   redis:
     image: redis:7-alpine
@@ -36,6 +37,7 @@ services:
   # rustdx-complete (TDX protocol) -> Redis Stream md:l1 + daily JSONL tape in ./data/tape
   market-gateway:
     profiles: ["live"]
+    image: ghcr.io/x-pai/alphagora-gateway:${AGORA_TAG:-latest}
     build:
       context: .
       dockerfile: services/market-gateway/Dockerfile
@@ -51,6 +53,7 @@ services:
       redis: { condition: service_healthy }
 
   arena-engine:
+    image: ghcr.io/x-pai/alphagora-engine:${AGORA_TAG:-latest}
     build:
       context: .
       dockerfile: services/arena-engine/Dockerfile
@@ -84,6 +87,7 @@ services:
   # deploy/fetch-openpup.sh installs a GitHub release under /opt/openpup on the host, mounted read-only here.
   pup-team:
     profiles: ["pup"]
+    image: ghcr.io/x-pai/alphagora-pup-team:${AGORA_TAG:-latest}
     build:
       context: .
       dockerfile: services/pup-team/Dockerfile
@@ -103,12 +107,14 @@ services:
     depends_on:
       arena-engine: { condition: service_healthy }
 
+  # Serves the site AND /api/v1 (forwarded to arena-engine), so a reverse proxy needs only this one upstream.
   web:
+    image: ghcr.io/x-pai/alphagora-web:${AGORA_TAG:-latest}
     build:
       context: ./apps/web
-      args:
-        NEXT_PUBLIC_ARENA_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
     restart: unless-stopped
+    environment:
+      ARENA_API_INTERNAL_URL: http://arena-engine:8000
     depends_on:
       arena-engine: { condition: service_healthy }
     ports: ["127.0.0.1:3000:3000"]

@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, API_BASE, ApiError, clearToken, getToken, setToken } from "@/lib/api";
+import { api, ApiError, clearToken, getToken, publicApiRoot, setToken } from "@/lib/api";
 
 type Path = "human" | "openpup_ai" | "external_bot";
 type Joined = { portfolio_id: string; name: string; token: string; initial_cash: string; season: string };
@@ -64,7 +64,7 @@ export default function JoinPage() {
   }
 
   const token = joined?.token ?? "agk_xxxxxxxx（先生成）";
-  const base = `${API_BASE}/api/v1`;
+  const base = publicApiRoot();
   const config = path === "external_bot"
     ? `export AGORA_TOKEN=${token}\n\ncurl -H "Authorization: Bearer $AGORA_TOKEN" ${base}/agent/state`
     : `# 把 packages/openpup-skill/agora-arena 放进 openpup 的 skills 目录\nexport AGORA_BASE_URL=${base}\nexport AGORA_TOKEN=${token}\n\npython3 agora-arena/scripts/run.py --input-json '{"task":"get_state"}'`;

@@ -1,4 +1,11 @@
-export const API_BASE = (process.env.NEXT_PUBLIC_ARENA_API_URL || "http://localhost:8000").replace(/\/$/, "");
+/** "" = same origin (the web app forwards /api/v1 to the engine). Set only to talk to an API on another origin. */
+export const API_BASE = (process.env.NEXT_PUBLIC_ARENA_API_URL || "").replace(/\/$/, "");
+
+/** Absolute API root for copy-paste snippets shown to bot authors. */
+export function publicApiRoot(): string {
+  const origin = API_BASE || (typeof window !== "undefined" ? window.location.origin : "");
+  return `${origin}/api/v1`;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {

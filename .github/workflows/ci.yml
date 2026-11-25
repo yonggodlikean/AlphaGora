@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: engine + runner tests (real Postgres via pgserver)
+        run: |
+          pip install -e "services/arena-engine[api,dev]"
+          pytest -q services/arena-engine/tests packages/openpup-skill/tests
+      - uses: dtolnay/rust-toolchain@stable
+      - name: gateway tests
+        run: cargo test -p market-gateway
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - name: web typecheck
+        working-directory: apps/web
+        run: npm ci && npx tsc --noEmit
+
+  images:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: engine, context: ., file: services/arena-engine/Dockerfile }
+          - { name: web, context: apps/web, file: apps/web/Dockerfile }
+          - { name: gateway, context: ., file: services/market-gateway/Dockerfile }
+          - { name: pup-team, context: ., file: services/pup-team/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/alphagora-${{ matrix.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=tag
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

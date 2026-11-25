@@ -325,3 +325,27 @@ async def test_open_orders_survive_a_restart_within_the_session(dsn):
     await client.aclose()
     await service.stop()
     await pool.close()
+
+
+
+@pytest.mark.anyio
+async def test_symbol_search_sort_and_paging(dsn):
+    service, client, pool = await boot(dsn)
+    await play(service, DemoMarket(seed=11).day(DAY1), 0, 300)
+    get = lambda **p: client.get("/api/v1/market/symbols", params=p)
+    hot = (await get(sort="hot", limit=3)).json()
+    assert hot["total"] == 7 and len(hot["symbols"]) == 3
+    sealed = [r for r in (await get(sort="hot", limit=50)).json()["symbols"] if r["limit_up_sealed"]]
+    if sealed:
+        assert hot["symbols"][0]["limit_up_sealed"]          # sealed boards come first in "hot"
+    chg = [r["chg_pct"] for r in (await get(sort="gainers", limit=50)).json()["symbols"]]
+    assert chg == sorted(chg, reverse=True)
+    assert [r["symbol"] for r in (await get(q="银行")).json()["symbols"]] == ["999002.SH"]
+    assert [r["symbol"] for r in (await get(q="998006")).json()["symbols"]] == ["998006.SZ"]
+    page2 = (await get(sort="code", limit=3, offset=3)).json()["symbols"]
+    assert [r["symbol"] for r in page2] == sorted(service.engine.books)[3:6]
+    only = (await get(symbols="999300.SH,nope.SH")).json()
+    assert [r["symbol"] for r in only["symbols"]] == ["999300.SH"]
+    await client.aclose()
+    await service.stop()
+    await pool.close()

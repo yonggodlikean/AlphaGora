@@ -41,7 +41,15 @@ If Nautilus later supports multi-account venues with a custom fill model, the `A
 ## Market data
 
 `services/market-gateway` (Rust) uses **rustdx-complete** (the actively maintained fork of rustdx; the original
-`rustdx` 0.4 has no real-time quote request) to poll TDX `SecurityQuotes` every 3s, 60 codes per request:
+`rustdx` 0.4 has no real-time quote request) to poll TDX `SecurityQuotes` every 3s, 60 codes per request.
+
+* universe: constituents of `GATEWAY_INDICES` (default CSI 300 + SSE 50 + CSI 1000 ≈ 1,300 names) plus
+  `GATEWAY_SYMBOLS`. TDX's block files list CSI 500/1000 with zero members, so constituents come from the official
+  CSI files (`{code}cons.xls`), refreshed every trading day; the last good list is cached in `universe.json`;
+* throughput: TDX servers are probed in parallel at the start of each day; `GATEWAY_CONNECTIONS` workers each
+  take a share of the 60-code requests on a different healthy server (~0.2–0.5 s per worker per cycle);
+* volume: ~430 snapshots/s live. The Redis stream keeps ~30k entries (the engine consumes live); tapes are
+  `DATE.jsonl.gz`, kept `TAPE_KEEP_DAYS` (7);
 
 * volumes 手 → shares (×100); `servertime` has no date, so it is stamped with the CST trade date;
 * `seq` = milliseconds since midnight of exchange time: monotonic within a day and stable across restarts;

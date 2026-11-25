@@ -676,15 +676,40 @@ class ArenaService:
                 r["rank"] = place
         return rows
 
-    def symbols(self) -> list[dict]:
-        out = []
-        for sym, b in sorted(self.engine.books.items()):
-            out.append({"symbol": sym, "name": self.names.get(sym, sym), "last": str(b.last_price),
-                        "prev_close": str(b.prev_close), "chg_pct": float(b.last_price / b.prev_close - 1) * 100,
-                        "upper_limit": str(b.upper_limit), "lower_limit": str(b.lower_limit),
-                        "limit_up_sealed": b.limit_up_sealed, "limit_down_sealed": b.limit_down_sealed,
-                        "suspended": b.suspended})
-        return out
+    def _symbol_row(self, sym: str, b: L1Snapshot) -> dict:
+        return {"symbol": sym, "name": self.names.get(sym, sym), "last": str(b.last_price),
+                "prev_close": str(b.prev_close), "chg_pct": float(b.last_price / b.prev_close - 1) * 100,
+                "upper_limit": str(b.upper_limit), "lower_limit": str(b.lower_limit),
+                "limit_up_sealed": b.limit_up_sealed, "limit_down_sealed": b.limit_down_sealed,
+                "suspended": b.suspended}
+
+    def symbols(self, q: str = "", sort: str = "hot", limit: int = 30, offset: int = 0,
+                only: list[str] | None = None) -> dict:
+        """The tradable universe, searched and sorted server-side (it can be ~1,300 symbols).
+
+        sort: hot (sealed limit-up first, then biggest gainers), gainers, losers, movers (|change|), code."""
+        books = self.engine.books
+        if only:
+            rows = [self._symbol_row(s, books[s]) for s in only if s in books]
+            return {"total": len(rows), "symbols": rows}
+        needle = q.strip().upper()
+        rows = []
+        for sym, b in books.items():
+            if needle:
+                name = self.names.get(sym, "")
+                if needle not in sym and needle not in name.upper():
+                    continue
+            rows.append(self._symbol_row(sym, b))
+        keys = {
+            "hot": lambda r: (not r["limit_up_sealed"], -r["chg_pct"]),
+            "gainers": lambda r: -r["chg_pct"],
+            "losers": lambda r: r["chg_pct"],
+            "movers": lambda r: -abs(r["chg_pct"]),
+            "code": lambda r: r["symbol"],
+        }
+        rows.sort(key=keys.get(sort, keys["hot"]))
+        return {"total": len(rows), "sealed_up": sum(1 for r in rows if r["limit_up_sealed"]),
+                "symbols": rows[offset:offset + limit]}
 
     def snapshot(self, symbols: list[str]) -> list[dict]:
         out = []

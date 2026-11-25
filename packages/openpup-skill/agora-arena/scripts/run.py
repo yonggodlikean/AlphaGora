@@ -77,7 +77,8 @@ def run(p: dict) -> dict:
         if syms:
             q = urllib.parse.urlencode({"symbols": ",".join(syms)})
             return call("GET", f"/market/snapshot?{q}", auth=False)
-        return call("GET", "/market/symbols", auth=False)
+        q = urllib.parse.urlencode({k: p[k] for k in ("q", "sort", "limit", "offset") if k in p})
+        return call("GET", f"/market/symbols?{q}" if q else "/market/symbols", auth=False)
     if task == "list_orders":
         return call("GET", "/agent/orders")
     if task == "get_leaderboard":

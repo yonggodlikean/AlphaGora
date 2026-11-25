@@ -55,8 +55,22 @@ class ReplayFeed:
 
     @classmethod
     def from_jsonl(cls, path: Path, speed: float = 0.0) -> "ReplayFeed":
-        with path.open(encoding="utf-8") as fh:
-            return cls((snapshot_from_dict(json.loads(line)) for line in fh if line.strip()), speed)
+        """Reads a gateway tape: plain `.jsonl` or `.jsonl.gz`. A gzip tape whose writer crashed lacks its
+        trailer; everything up to the last flushed batch is still returned."""
+        if path.suffix == ".gz":
+            import zlib
+            text = zlib.decompressobj(zlib.MAX_WBITS | 16).decompress(path.read_bytes())  # no trailer needed
+            lines = text.decode("utf-8", errors="replace").splitlines()
+        else:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        snaps = []
+        for line in lines:
+            if line.strip():
+                try:
+                    snaps.append(snapshot_from_dict(json.loads(line)))
+                except (ValueError, KeyError, MarketDataError):
+                    continue   # a torn last line after a crash
+        return cls(snaps, speed)
 
     async def subscribe(self, symbols: Sequence[str]) -> None:
         self._symbols = set(symbols)

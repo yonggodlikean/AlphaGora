@@ -61,3 +61,13 @@ def test_replay_feed_reads_gateway_tape(tmp_path: Path):
     tape.write_text(json.dumps(LIVE) + "\n" + json.dumps(dict(LIVE, seq=LIVE["seq"] + 3000)) + "\n")
     snaps = collect(ReplayFeed.from_jsonl(tape), 2)
     assert [s.seq for s in snaps] == [53997010, 54000010]
+
+
+def test_replay_feed_reads_gzip_tape_even_without_trailer(tmp_path: Path):
+    import zlib
+    body = "\n".join(json.dumps(dict(LIVE, seq=LIVE["seq"] + i * 3000)) for i in range(3)) + "\n"
+    comp = zlib.compressobj(6, zlib.DEFLATED, zlib.MAX_WBITS | 16)
+    data = comp.compress(body.encode()) + comp.flush(zlib.Z_SYNC_FLUSH)   # what a crashed writer leaves behind
+    tape = tmp_path / "2026-11-26.jsonl.gz"
+    tape.write_bytes(data)
+    assert [s.seq for s in collect(ReplayFeed.from_jsonl(tape), 3)] == [53997010, 54000010, 54003010]

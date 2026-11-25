@@ -17,6 +17,9 @@ const IDEAS = {
   sell: ["到目标价了，落袋", "跌破 5 日线，止损", "情绪太热，先跑"],
 };
 
+type ListTab = "hot" | "gainers" | "losers" | "held";
+const LIST_TABS: [ListTab, string][] = [["hot", "热门"], ["gainers", "涨幅"], ["losers", "跌幅"], ["held", "我的持仓"]];
+
 const STATUS: Record<string, [string, string]> = {
   new: ["挂单中", "pill-gray"], partially_filled: ["部分成交", "pill-gold"], filled: ["已成交", "pill-up"],
   canceled: ["已撤单", "pill-gray"], expired: ["已过期", "pill-gray"],
@@ -61,12 +64,27 @@ function Desk() {
     api<{ orders: OrderView[] }>("/api/v1/agent/orders", { auth: true }).then((r) => setOrders(r.orders)).catch(() => undefined);
   }, []);
   usePoll(loadAccount, 8000);
-  usePoll(() => {
-    api<{ symbols: SymbolRow[] }>("/api/v1/market/symbols").then((r) => {
+  const [query, setQuery] = useState("");
+  const [listTab, setListTab] = useState<ListTab>("hot");
+  const [listInfo, setListInfo] = useState<{ total: number; sealed: number }>({ total: 0, sealed: 0 });
+  const heldSymbols = (state?.positions ?? []).map((p) => p.symbol).join(",");
+  const loadSymbols = useCallback(() => {
+    if (listTab === "held" && !heldSymbols) { setSymbols([]); setListInfo({ total: 0, sealed: 0 }); return; }
+    const params = new URLSearchParams({ limit: "24" });
+    if (listTab === "held") params.set("symbols", heldSymbols);
+    else params.set("sort", listTab);
+    if (query.trim()) params.set("q", query.trim());
+    api<{ symbols: SymbolRow[]; total: number; sealed_up?: number }>(`/api/v1/market/symbols?${params}`).then((r) => {
       setSymbols(r.symbols);
-      setSel((s) => s ?? r.symbols[0]?.symbol ?? null);
+      setListInfo({ total: r.total, sealed: r.sealed_up ?? 0 });
+      setSel((cur) => cur ?? r.symbols[0]?.symbol ?? null);
     }).catch(() => undefined);
-  }, 6000);
+  }, [listTab, query, heldSymbols]);
+  usePoll(loadSymbols, 6000);
+  useEffect(() => {                       // search as you type, without hammering the API
+    const id = setTimeout(loadSymbols, 300);
+    return () => clearTimeout(id);
+  }, [loadSymbols]);
   const loadBook = useCallback(() => {
     if (!sel) return;
     api<{ snapshots: Snapshot[] }>(`/api/v1/market/snapshot?symbols=${sel}`).then((r) => setBook(r.snapshots[0] ?? null)).catch(() => undefined);
@@ -186,8 +204,23 @@ function Desk() {
       <div className="row" style={{ gap: 20 }}>
         <section className="card grow stack" aria-labelledby="ticket-title" style={{ gap: 18 }}>
           <h2 id="ticket-title">下单</h2>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+            <label style={{ flex: "1 1 240px", minWidth: 0 }}>
+              <span className="small muted" style={{ display: "block", marginBottom: 4 }}>搜索股票（代码或名称）</span>
+              <input className="input" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="例如 600519 或 茅台" />
+            </label>
+            <div className="tabs" role="tablist" aria-label="股票列表" style={{ alignSelf: "flex-end" }}>
+              {LIST_TABS.map(([id, label]) => (
+                <button key={id} type="button" role="tab" className="tab" aria-selected={listTab === id} onClick={() => setListTab(id)}>{label}</button>
+              ))}
+            </div>
+          </div>
+          <span className="small muted" style={{ marginTop: -8 }}>
+            {listTab === "held" ? `持仓 ${listInfo.total} 只` : `${query.trim() ? "找到" : "股票池共"} ${int(listInfo.total)} 只`}
+            {listTab === "hot" && !query.trim() && listInfo.sealed ? ` · 封板 ${listInfo.sealed} 只，排在最前` : ""}
+          </span>
           <div role="radiogroup" aria-label="选择股票" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
-            {symbols.length === 0 ? <p className="empty">等待行情…</p> : null}
+            {symbols.length === 0 ? <p className="empty">{query.trim() ? "没有匹配的股票" : listTab === "held" ? "还没有持仓" : "等待行情…（交易时段 09:25–15:00）"}</p> : null}
             {symbols.map((s) => (
               <button key={s.symbol} type="button" role="radio" aria-checked={sel === s.symbol} onClick={() => setSel(s.symbol)}
                 style={{ textAlign: "left", minHeight: 72, padding: "10px 12px", borderRadius: 12, cursor: "pointer", display: "flex", flexDirection: "column", gap: 2,

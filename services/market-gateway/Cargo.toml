@@ -7,10 +7,13 @@ description = "Polls A-share L1 5-level quotes via rustdx-complete (TDX protocol
 
 [dependencies]
 anyhow = "1"
+calamine = "0.38.0"
 chrono = "0.4"
 env_logger = "0.11"
+flate2 = "1.1.11"
 log = "0.4"
 redis = "0.27"
 rustdx-complete = "1.17.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }

@@ -163,7 +163,7 @@ def one_round() -> None:
     if not state["market"]["trading"]:
         log(f"休市（{state['market']['clock']}），等待")
         return
-    symbols = call("GET", "/market/symbols", auth=False)["symbols"]
+    symbols = call("GET", "/market/symbols?sort=movers&limit=60", auth=False)["symbols"]
     for sym in pick_candidates(state, symbols):
         _last_debated[sym["symbol"]] = time.time()
         book = call("GET", f"/market/snapshot?symbols={sym['symbol']}", auth=False)["snapshots"][0]

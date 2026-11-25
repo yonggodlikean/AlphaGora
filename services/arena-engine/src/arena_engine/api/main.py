@@ -196,8 +196,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return s.market_status()
 
     @app.get("/api/v1/market/symbols")
-    async def symbols(s: Svc):
-        return {"symbols": s.symbols(), "market": s.market_status()}
+    async def symbols(s: Svc, q: str = Query("", max_length=20),
+                      sort: Literal["hot", "gainers", "losers", "movers", "code"] = "hot",
+                      limit: int = Query(30, ge=1, le=200), offset: int = Query(0, ge=0),
+                      symbols: str = Query("", max_length=2000)):
+        only = [x.strip() for x in symbols.split(",") if x.strip()][:200] or None
+        return s.symbols(q, sort, limit, offset, only) | {"market": s.market_status()}
 
     @app.get("/api/v1/market/snapshot")
     async def snapshot(s: Svc, symbols: str = Query(..., max_length=2000)):

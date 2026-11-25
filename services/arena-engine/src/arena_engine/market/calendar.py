@@ -34,6 +34,23 @@ class TradingCalendar:
         # [start, end): an order stamped exactly 11:30:00 or 15:00:00 is outside the session.
         return any(start <= t < end for start, end in self.sessions)
 
+    def phase(self, ts: datetime) -> str:
+        """Where the wall clock is in the exchange day: holiday | pre_open | auction | trading | lunch | closed.
+        (Calendar only; whether quotes are actually flowing is the caller's business.)"""
+        local = ts.astimezone(CST)
+        if not self.is_trading_day(local.date()):
+            return "holiday"
+        t = local.time()
+        if t < time(9, 15):
+            return "pre_open"
+        if t < self.sessions[0][0]:
+            return "auction"
+        if self.is_continuous_trading(local):
+            return "trading"
+        if t < self.sessions[-1][0]:
+            return "lunch"
+        return "closed"
+
     @staticmethod
     def trade_date_of(ts: datetime) -> date:
         return ts.astimezone(CST).date()

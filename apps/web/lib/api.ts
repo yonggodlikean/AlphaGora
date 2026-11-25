@@ -75,7 +75,8 @@ export async function api<T>(path: string, init: RequestInit & { auth?: boolean 
 }
 
 // ---------------------------------------------------------------- response types
-export type Market = { trading: boolean; day_open: boolean; trade_date: string | null; clock: string; simulated: boolean; feed: string; online?: number; visitors_today?: number };
+export type Phase = "holiday" | "pre_open" | "auction" | "trading" | "waiting" | "lunch" | "closed";
+export type Market = { trading: boolean; phase?: Phase; day_open: boolean; trade_date: string | null; clock: string; now?: string; simulated: boolean; feed: string; online?: number; visitors_today?: number };
 export type Driver = { kind: "rules" | "external"; name: string | null; online: boolean; last_seen: string | null } | null;
 export type Group = "official_ai" | "community_ai" | "benchmark" | "human" | "hybrid" | "bot";
 export type BoardRow = {

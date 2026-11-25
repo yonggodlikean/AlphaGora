@@ -120,8 +120,22 @@ async def test_cheers_and_visitors(dsn):
     for h in (v1, v2, v1):
         await client.get("/api/v1/market/status", headers=h)
     st = (await client.get("/api/v1/market/status", headers=v2)).json()
-    assert st["visitors_today"] == 2 and "online" in st
+    assert st["visitors_today"] == 2 and st["online"] == 2 and "phase" in st
+    for k in service._watching:                       # both browsers went quiet a while ago
+        service._watching[k] -= 120
+    assert service.watching() == 0
     await service.refresh_controls()
     today, total = await service.store.visits(service._visitors_day)
     assert (today, total) == (2, 2)
     await client.aclose(); await service.stop(); await pool.close()
+
+
+def test_calendar_phase():
+    from datetime import date, datetime, time
+    from arena_engine.market.calendar import CST, TradingCalendar
+    cal = TradingCalendar(holidays=frozenset({date(2026, 10, 1)}))
+    at = lambda d, h, m: datetime.combine(d, time(h, m), CST)
+    wed, sat = date(2026, 11, 25), date(2026, 11, 28)
+    assert [cal.phase(at(wed, h, m)) for h, m in ((8, 0), (9, 20), (9, 30), (11, 30), (12, 59), (13, 0), (15, 0))] == \
+        ["pre_open", "auction", "trading", "lunch", "lunch", "trading", "closed"]
+    assert cal.phase(at(sat, 10, 0)) == "holiday" and cal.phase(at(date(2026, 10, 1), 10, 0)) == "holiday"

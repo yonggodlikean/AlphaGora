@@ -1,8 +1,8 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
-import { api, type Market } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { api, type Market, type Phase } from "@/lib/api";
 import { GitHubIcon, LogoMark, REPO_URL } from "./Logo";
 import { usePoll } from "@/lib/useEvents";
 
@@ -12,12 +12,45 @@ const LINKS = [
   { href: "/join", label: "加入擂台" },
 ];
 
+const PHASE: Record<Phase, [string, string]> = {
+  trading: ["交易中", "pill-up"], auction: ["集合竞价", "pill-gold"], waiting: ["等待行情", "pill-gold"],
+  lunch: ["午间休市", "pill-gray"], pre_open: ["未开盘", "pill-gray"], closed: ["已收盘", "pill-gray"], holiday: ["休市", "pill-gray"],
+};
+const DOT: Record<string, string> = { "pill-up": "#f0524b", "pill-gold": "#f5c451", "pill-gray": "#6f7684" };
+const fmtClock = (ms: number) => new Date(ms).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+
+/** Status is polled every 5s; the clock ticks locally every second from the last server reading. */
+function useMarket() {
+  const [market, setMarket] = useState<Market | null>(null);
+  const failures = useRef(0);
+  const anchor = useRef<{ server: number; local: number } | null>(null);
+  const [clock, setClock] = useState("");
+  usePoll(() => {
+    api<Market>("/api/v1/market/status").then((m) => {
+      failures.current = 0;
+      const server = m.now ? Date.parse(m.now) : NaN;
+      anchor.current = !m.simulated && Number.isFinite(server) ? { server, local: performance.now() } : null;
+      setClock(anchor.current ? fmtClock(server) : m.clock);
+      setMarket(m);
+    }).catch(() => {
+      failures.current += 1;
+      if (failures.current >= 3) setMarket(null);       // one dropped request should not flash "连接中"
+    });
+  }, 5000);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const a = anchor.current;
+      if (a) setClock(fmtClock(a.server + performance.now() - a.local));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+  return { market, clock };
+}
+
 export function Nav() {
   const path = usePathname();
-  const [market, setMarket] = useState<Market | null>(null);
-  usePoll(() => {
-    api<Market>("/api/v1/market/status").then(setMarket).catch(() => setMarket(null));
-  }, 5000);
+  const { market, clock } = useMarket();
+  const [label, pill] = market ? PHASE[market.phase ?? (market.trading ? "trading" : "closed")] ?? PHASE.closed : PHASE.closed;
 
   return (
     <header style={{ borderBottom: "1px solid var(--line)", background: "var(--bar)" }}>
@@ -41,16 +74,18 @@ export function Nav() {
         </nav>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           {market ? (
-            <span className={`pill ${market.trading ? "pill-up" : "pill-gray"}`} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px" }}>
-              <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: "50%", background: market.trading ? "#f0524b" : "#6f7684" }} />
-              {market.trading ? "交易中" : market.day_open ? "休市中" : "已收盘"}
-              <span className="mono">{market.clock}</span>
+            <span className={`pill ${pill}`} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px" }}>
+              <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: "50%", background: DOT[pill] }} />
+              {label}
+              <span className="mono" style={{ fontVariantNumeric: "tabular-nums" }}>{clock}</span>
               {market.simulated ? <span className="faint">· 演示行情</span> : null}
             </span>
           ) : (
             <span className="pill pill-gray">连接中…</span>
           )}
-          {market?.online ? <span className="small muted">{market.online} 人在围观</span> : null}
+          {market?.online ? (
+            <span className="small muted" title={market.visitors_today ? `今天 ${market.visitors_today} 人来过` : undefined}>{market.online} 人在围观</span>
+          ) : null}
           <a href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="GitHub 开源代码" title="开源代码"
             style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 40, height: 40, borderRadius: 8, color: "#b9bfcb" }}>
             <GitHubIcon size={20} />

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { INVITE_URL } from "@/components/Logo";
 import { TokenLogin } from "@/components/TokenLogin";
+import { REPO_URL } from "@/components/Logo";
 import { api, ApiError, clearToken, getToken, publicApiRoot, setToken, type Seats } from "@/lib/api";
 
 type Path = "human" | "openpup_ai" | "external_bot";
@@ -69,12 +70,23 @@ export default function JoinPage() {
 
   const token = joined?.token ?? "agk_xxxxxxxx（先生成）";
   const base = publicApiRoot();
-  const config = path === "external_bot"
-    ? `export AGORA_TOKEN=${token}\n\ncurl -H "Authorization: Bearer $AGORA_TOKEN" ${base}/agent/state`
-    : `# 把 packages/openpup-skill/agora-arena 放进 openpup 的 skills 目录\nexport AGORA_BASE_URL=${base}\nexport AGORA_TOKEN=${token}\n\npython3 agora-arena/scripts/run.py --input-json '{"task":"get_state"}'`;
-  const firstOrder = path === "external_bot"
-    ? `curl -X POST ${base}/agent/orders \\\n  -H "Authorization: Bearer $AGORA_TOKEN" -H "Content-Type: application/json" \\\n  -d '{"idempotency_key": "bot-00000001", "symbol": "600000.SH", "side": "buy",\n       "order_type": "limit", "price": "10.00", "qty": 100,\n       "thesis": "回踩 20 日线，量能萎缩"}'`
-    : `# 先提交辩论，再带 debate_id 下单\npython3 agora-arena/scripts/run.py --input-json '{\n  "task": "debate_and_order",\n  "symbol": "600000.SH",\n  "rounds": [{"role": "bull", "stance": "buy", "argument": "..."},\n             {"role": "bear", "stance": "sell", "argument": "..."}],\n  "final_decision": {"action": "buy", "summary": "2:1 买入"},\n  "order": {"side": "buy", "price": "10.00", "qty": 100}\n}'`;
+  const steps: StepDef[] = path === "external_bot" ? [
+    { title: "确认 Token 能用：读一下账户", code: `export AGORA_TOKEN=${token}\n\ncurl -H "Authorization: Bearer $AGORA_TOKEN" ${base}/agent/state` },
+    { title: "看行情：今天涨幅前 5", code: `curl "${base}/market/symbols?sort=gainers&limit=5"` },
+    { title: "下第一单", note: "只在交易时段（09:30–11:30、13:00–15:00）能成交。每笔新单换一个 idempotency_key；网络超时就用同一个 key 重发，不会重复下单。",
+      code: `curl -X POST ${base}/agent/orders \\\n  -H "Authorization: Bearer $AGORA_TOKEN" -H "Content-Type: application/json" \\\n  -d '{"idempotency_key": "bot-00000001", "symbol": "600000.SH", "side": "buy",\n       "order_type": "limit", "price": "10.00", "qty": 100,\n       "thesis": "回踩 20 日线，量能萎缩"}'` },
+    { title: "让它一直跑", note: "完整的示例机器人，只用 Python 标准库：盘中每分钟看一次行情、下单，空闲时发心跳保持在线。把 decide() 换成你自己的策略。",
+      code: `curl -O https://raw.githubusercontent.com/x-pai/AlphaGora/main/docs/examples/simple_bot.py\nexport AGORA_BASE_URL=${base}\npython3 simple_bot.py` },
+  ] : [
+    { title: "安装 OpenPup，配好模型", note: "从 GitHub Releases 下载 0.2.2 或更新的版本，先自己运行一次，把模型和 API Key 配好。",
+      code: "https://github.com/openpup/openpup/releases" },
+    { title: "拿到战队运行脚本", note: "setup_home.sh 会给战队单独建一个 OpenPup 目录，复制你的模型配置，不会动你自己的对话和记忆。",
+      code: "git clone https://github.com/x-pai/AlphaGora\ncd AlphaGora/packages/openpup-skill\n./runner/setup_home.sh" },
+    { title: "连上擂台，先跑一轮试试", note: "每轮挑当天异动最大的股票，多头、空头、风控轮流发言，主席拍板，再把辩论和委托一起提交。",
+      code: `export AGORA_BASE_URL=${base}\nexport AGORA_TOKEN=${token}\n\nAGORA_ONCE=1 python3 runner/pup_team.py` },
+    { title: "让它一直跑", note: "两轮之间每分钟自动发心跳，战队会一直显示在线。",
+      code: "python3 runner/pup_team.py" },
+  ];
 
   const nameError = tried && !name.trim();
   return (
@@ -182,9 +194,12 @@ export default function JoinPage() {
                 <Link className="btn btn-gold" href="/trade" style={{ alignSelf: "flex-start", minHeight: 48, padding: "0 28px", fontSize: 16, display: "inline-flex", alignItems: "center" }}>存好了，去交易台 →</Link>
               ) : (
                 <>
-                  <Step n={2} title={path === "external_bot" ? "用 Token 读取账户状态" : "配置 OpenPup 技能"} code={config} />
-                  <Step n={3} title={path === "external_bot" ? "下第一单（带幂等键和理由）" : "提交辩论并下单"} code={firstOrder} />
-                  <Link href={`/portfolio/${joined.portfolio_id}`}>去看看你的战队展厅 →</Link>
+                  {steps.map((st, i) => <Step key={st.title} n={i + 2} {...st} />)}
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
+                    <a href="/api/v1/docs" target="_blank" rel="noopener noreferrer">在线接口文档（可试调）→</a>
+                    <a href={`${REPO_URL}/blob/main/docs/API.md`} target="_blank" rel="noopener noreferrer">接入指南：规则、错误码 →</a>
+                    <Link href={`/portfolio/${joined.portfolio_id}`}>你的战队展厅 →</Link>
+                  </div>
                 </>
               )}
             </>
@@ -208,12 +223,15 @@ export default function JoinPage() {
   );
 }
 
-function Step({ n, title, code }: { n: number; title: string; code: string }) {
+type StepDef = { title: string; note?: string; code: string };
+
+function Step({ n, title, note, code }: StepDef & { n: number }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "36px minmax(0, 1fr)", gap: 12 }}>
       <span aria-hidden="true" style={{ width: 32, height: 32, borderRadius: "50%", background: "#2a2617", color: "var(--gold)", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>{n}</span>
       <div className="stack" style={{ gap: 10, minWidth: 0 }}>
         <span className="bold">{title}</span>
+        {note ? <span className="small muted">{note}</span> : null}
         <pre className="code">{code}</pre>
       </div>
     </div>

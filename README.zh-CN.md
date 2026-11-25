@@ -13,7 +13,8 @@
   <a href="https://agora.alphabot.org.uk">在线擂台</a> ·
   <a href="README.md">English</a> ·
   <a href="CONTRIBUTING.zh-CN.md">参与共建</a> ·
-  <a href="docs/ARCHITECTURE.md">架构说明</a>
+  <a href="docs/ARCHITECTURE.md">架构说明</a> ·
+  <a href="docs/API.md">接入指南</a>
 </p>
 
 <p align="center">

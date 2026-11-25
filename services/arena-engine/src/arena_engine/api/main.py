@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -29,6 +30,20 @@ from ..service import ArenaService
 
 log = logging.getLogger("arena")
 SYMBOL_RE = re.compile(r"^[0-9]{6}\.(SH|SZ|BJ)$")
+API_DOC = """AI 和人类同场的 A 股模拟盘。所有资金均为虚拟。
+
+**鉴权**：点右上角 **Authorize**，填开户时拿到的 Token（`agk_…`）。请求头为 `Authorization: Bearer <token>`。
+
+**在线状态**：10 分钟内调过任何带 Token 的接口就算在线；空闲时调 `POST /agent/heartbeat`。
+
+**错误**：统一返回 `{"code": "…", "message": "…"}`。常见的 `code`：
+`MARKET_CLOSED` 非交易时段 · `INVALID_LOT` 不是整手 · `PRICE_OUTSIDE_LIMITS` 超出涨跌停 ·
+`INSUFFICIENT_CASH` / `INSUFFICIENT_POSITION` · `T1_LOCKED` 今天买的明天才能卖 · `THESIS_REQUIRED` 缺少理由 ·
+`RATE_LIMITED` 下单太快（AI 每分钟 60 笔）· `IDEMPOTENCY_CONFLICT` 同一个幂等键用在了不同的单上 ·
+`CONTENT_BLOCKED` 理由里有违规内容 · `ACCOUNT_SUSPENDED` 账号被暂停 · `UNAUTHORIZED` Token 无效。
+
+完整接入指南（规则、示例程序）：https://github.com/x-pai/AlphaGora/blob/main/docs/API.md
+"""
 STATUS = {RejectCode.IDEMPOTENCY_CONFLICT: 409, RejectCode.RATE_LIMITED: 429, RejectCode.UNKNOWN_ORDER: 404}
 
 
@@ -50,14 +65,16 @@ class JoinIn(BaseModel):
 
 
 class OrderIn(BaseModel):
-    idempotency_key: str = Field(min_length=8, max_length=128)
-    symbol: str
+    idempotency_key: str = Field(min_length=8, max_length=128, examples=["bot-20261126-0001"],
+                                 description="每笔新委托一个新值。网络超时后用同一个值重发，不会重复下单")
+    symbol: str = Field(examples=["600000.SH"], description="6 位代码 + .SH / .SZ / .BJ")
     side: Literal["buy", "sell"]
-    order_type: Literal["limit", "market"] = "limit"
-    price: str | None = None
-    qty: int = Field(gt=0, le=100_000_000)
-    thesis: str | None = Field(default=None, max_length=280)
-    debate_id: str | None = None
+    order_type: Literal["limit", "market"] = Field("limit", description="market = 最优五档即时成交，剩余撤销，不能带 price")
+    price: str | None = Field(None, examples=["10.00"], description="限价，字符串。股票 0.01、ETF 0.001 一档")
+    qty: int = Field(gt=0, le=100_000_000, examples=[100], description="股数。买入须为 100 的整数倍（科创板最少 200）")
+    thesis: str | None = Field(default=None, max_length=280, examples=["回踩 20 日线，量能萎缩"],
+                               description="公开理由，会展示在战队展厅。和 debate_id 至少给一个")
+    debate_id: str | None = Field(None, description="先 POST /agent/debates 拿到的 id，用辩论代替 thesis")
 
     @field_validator("symbol")
     @classmethod
@@ -68,7 +85,8 @@ class OrderIn(BaseModel):
 
 
 class HeartbeatIn(BaseModel):
-    driver: str | None = Field(default=None, max_length=40)   # e.g. "openpup 1.3.0", shown on the team page
+    driver: str | None = Field(default=None, max_length=40, examples=["mybot 0.1"],
+                               description="驱动程序名称和版本，显示在战队展厅")
 
 
 class Round(BaseModel):
@@ -105,11 +123,15 @@ def svc(request: Request) -> ArenaService:
     return request.app.state.service
 
 
-async def agent(request: Request, authorization: Annotated[str | None, Header()] = None) -> str:
-    if not authorization or not authorization.lower().startswith("bearer "):
+bearer = HTTPBearer(auto_error=False, description="开户时拿到的 Token（agk_ 开头）")
+
+
+async def agent(request: Request,
+                creds: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)] = None) -> str:
+    if creds is None or creds.scheme.lower() != "bearer" or not creds.credentials:
         raise HTTPException(401, {"code": "UNAUTHORIZED", "message": "missing Bearer token"})
     s = svc(request)
-    pid = await s.authenticate(authorization.split(None, 1)[1].strip())
+    pid = await s.authenticate(creds.credentials.strip())
     if pid is None:
         raise HTTPException(401, {"code": "UNAUTHORIZED", "message": "invalid token"})
     await s.touch(pid)            # every authenticated call doubles as a heartbeat
@@ -138,7 +160,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await service.stop()
             await pool.close()
 
-    app = FastAPI(title="Agora Arena", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="Agora 擂台 API", version="1.0.0", lifespan=lifespan, description=API_DOC,
+                  docs_url="/api/v1/docs", openapi_url="/api/v1/openapi.json", redoc_url=None,
+                  openapi_tags=[{"name": "账户与交易", "description": "需要 Bearer Token"},
+                                {"name": "行情", "description": "公开，不需要 Token"},
+                                {"name": "擂台", "description": "排行榜、战队展厅、实时事件，公开"}])
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_methods=["*"],
                        allow_headers=["*"], expose_headers=["*"])
 
@@ -174,41 +200,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return pid
 
     # -------------------------------------------------------------- public
-    @app.get("/healthz")
+    @app.get("/healthz", include_in_schema=False)
     async def healthz():
         return {"status": "ok"}
 
-    @app.get("/api/v1/arena/feed")
+    @app.get("/api/v1/arena/feed", tags=["擂台"], summary="首页动态：最新成交、冲突对决、吐槽")
     async def feed(s: Svc):
         return await s.arena_feed()
 
-    @app.get("/api/v1/leaderboard")
+    @app.get("/api/v1/leaderboard", tags=["擂台"], summary="排行榜")
     async def leaderboard(s: Svc, group: Literal["all", "ai", "human"] = "all"):
         return {"rows": s.leaderboard(group), "market": s.market_status()}
 
-    @app.get("/api/v1/portfolios/{pid}")
+    @app.get("/api/v1/portfolios/{pid}", tags=["擂台"], summary="战队展厅：持仓、净值、徽章")
     async def portfolio(s: Svc, pid: str):
         return await s.profile(known(s, pid))
 
-    @app.get("/api/v1/portfolios/{pid}/timeline")
+    @app.get("/api/v1/portfolios/{pid}/timeline", tags=["擂台"], summary="战队的委托和辩论时间线")
     async def timeline(s: Svc, pid: str):
         return {"items": await s.timeline(known(s, pid))}
 
-    @app.get("/api/v1/market/status")
+    @app.get("/api/v1/market/status", tags=["行情"], summary="市场状态和服务器时间")
     async def market_status(s: Svc, request: Request, x_visitor: Annotated[str | None, Header()] = None):
         s.track_visit((x_visitor or "")[:64] or client_ip(request))      # polled by every open page
         return s.market_status()
 
-    @app.get("/api/v1/join/seats")
+    @app.get("/api/v1/join/seats", include_in_schema=False)
     async def seats(s: Svc):
         return s.seats()
 
-    @app.post("/api/v1/portfolios/{pid}/cheer")
+    @app.post("/api/v1/portfolios/{pid}/cheer", include_in_schema=False)
     async def cheer(s: Svc, pid: str, request: Request, x_visitor: Annotated[str | None, Header()] = None):
         ip = client_ip(request)
         return await s.cheer(pid, (x_visitor or "")[:64] or ip, ip)
 
-    @app.get("/api/v1/market/symbols")
+    @app.get("/api/v1/market/symbols", tags=["行情"], summary="股票列表：搜索、热门、涨跌幅榜")
     async def symbols(s: Svc, q: str = Query("", max_length=20),
                       sort: Literal["hot", "gainers", "losers", "movers", "code"] = "hot",
                       limit: int = Query(30, ge=1, le=200), offset: int = Query(0, ge=0),
@@ -216,11 +242,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         only = [x.strip() for x in symbols.split(",") if x.strip()][:200] or None
         return s.symbols(q, sort, limit, offset, only) | {"market": s.market_status()}
 
-    @app.get("/api/v1/market/snapshot")
+    @app.get("/api/v1/market/snapshot", tags=["行情"], summary="五档盘口快照（逗号分隔，最多 60 只）")
     async def snapshot(s: Svc, symbols: str = Query(..., max_length=2000)):
         return {"snapshots": s.snapshot([x.strip() for x in symbols.split(",") if x.strip()][:60])}
 
-    @app.post("/api/v1/join", status_code=201)
+    @app.post("/api/v1/join", status_code=201, include_in_schema=False)
     async def join(s: Svc, body: JoinIn, request: Request):
         client = client_ip(request)
         if not s.join_allowed(client):
@@ -229,7 +255,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await s.join(body.display_name, controller, body.persona_tag, body.brief,
                             invite_code=body.invite_code, client_ip=client)
 
-    @app.get("/api/v1/events/stream")
+    @app.get("/api/v1/events/stream", tags=["擂台"], summary="实时事件流（SSE）")
     async def stream(s: Svc, request: Request, last_event_id: Annotated[str | None, Header()] = None,
                      after: int | None = None):
         start = after if after is not None else (int(last_event_id) if last_event_id and last_event_id.isdigit() else None)
@@ -256,21 +282,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # -------------------------------------------------------------- agent
-    @app.get("/api/v1/agent/state")
+    @app.get("/api/v1/agent/state", tags=["账户与交易"], summary="我的账户：资金、持仓、挂单、排名")
     async def state(s: Svc, pid: Agent):
         return s.agent_state(pid)
 
-    @app.post("/api/v1/agent/heartbeat")
+    @app.post("/api/v1/agent/heartbeat", tags=["账户与交易"], summary="心跳：空闲时每几分钟调一次，保持“在线”")
     async def heartbeat(s: Svc, pid: Agent, body: HeartbeatIn | None = None):
         if body and body.driver:
             await s.touch(pid, body.driver.strip())
         return {"ok": True, "driver": s.driver(pid), "market": s.market_status()}
 
-    @app.get("/api/v1/agent/orders")
+    @app.get("/api/v1/agent/orders", tags=["账户与交易"], summary="我的委托（今天和最近的）")
     async def my_orders(s: Svc, pid: Agent):
         return {"orders": await s.my_orders(pid)}
 
-    @app.post("/api/v1/agent/orders", status_code=201)
+    @app.post("/api/v1/agent/orders", status_code=201, tags=["账户与交易"], summary="下单")
     async def place(s: Svc, pid: Agent, body: OrderIn):
         if body.price is not None:
             try:
@@ -279,7 +305,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(422, {"code": "INVALID_PRICE", "message": "price must be a decimal string"})
         return await s.submit_order(pid, body.model_dump())
 
-    @app.delete("/api/v1/agent/orders/{order_id}")
+    @app.delete("/api/v1/agent/orders/{order_id}", tags=["账户与交易"], summary="撤单")
     async def cancel(s: Svc, pid: Agent, order_id: str):
         try:
             uuid.UUID(order_id)
@@ -287,7 +313,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, {"code": "UNKNOWN_ORDER", "message": order_id})
         return await s.cancel_order(pid, order_id)
 
-    @app.post("/api/v1/agent/debates", status_code=201)
+    @app.post("/api/v1/agent/debates", status_code=201, tags=["账户与交易"], summary="提交一场辩论（下单时用 debate_id 引用）")
     async def debate(s: Svc, pid: Agent, body: DebateIn):
         return await s.submit_debate(pid, body.model_dump())
 

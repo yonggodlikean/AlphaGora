@@ -7,6 +7,7 @@ profile) come from engine memory plus a few queries.
 from __future__ import annotations
 
 import asyncio
+import time as time_mod
 import hashlib
 import hmac
 import logging
@@ -94,6 +95,7 @@ class ArenaService:
         self._visitors: set[str] = set()
         self._visitors_day: date | None = None
         self._visitors_saved = 0
+        self._watching: dict[str, float] = {}       # visitor hash -> monotonic time of its last status poll
         self._cheer_ip: dict[str, tuple[date, int]] = {}
         self._order_day: dict[str, tuple[date, int]] = {}
         self._limiters: dict[int, SlidingWindowLimiter] = {}
@@ -246,11 +248,21 @@ class ArenaService:
         now = self.now()
         trading = self.engine.day_open and self.calendar.is_continuous_trading(now) \
             and self.calendar.trade_date_of(now) == self.engine.trade_date
-        return {"trading": trading, "day_open": self.engine.day_open,
+        phase = self.calendar.phase(now)
+        if phase == "trading" and not trading:
+            phase = "waiting"            # in session by the clock, but no quotes have opened the day yet
+        return {"trading": trading, "phase": phase, "day_open": self.engine.day_open,
                 "trade_date": None if self.engine.trade_date is None else self.engine.trade_date.isoformat(),
                 "clock": now.astimezone(CST).strftime("%H:%M:%S"), "now": now.isoformat(),
                 "simulated": self.settings.is_simulated_clock, "feed": self.settings.market_feed,
-                "online": self.bus.subscribers, "visitors_today": len(self._visitors)}
+                "online": self.watching(), "streams": self.bus.subscribers, "visitors_today": len(self._visitors)}
+
+    def watching(self, window_s: float = 60.0) -> int:
+        """Browsers that polled the status in the last minute. Every page polls every 5s while its tab is visible,
+        so this counts people actually looking, once per browser, on any page."""
+        cutoff = time_mod.monotonic() - window_s
+        self._watching = {v: t for v, t in self._watching.items() if t >= cutoff}
+        return len(self._watching)
 
     # ================================================================== market data
     async def on_snapshot(self, snap: L1Snapshot) -> None:
@@ -451,7 +463,9 @@ class ArenaService:
         today = datetime.now(CST).date()
         if self._visitors_day != today:
             self._visitors_day, self._visitors, self._visitors_saved = today, set(), 0
-        self._visitors.add(hashlib.sha256((self.settings.token_pepper + "|v|" + visitor).encode()).hexdigest()[:20])
+        key = hashlib.sha256((self.settings.token_pepper + "|v|" + visitor).encode()).hexdigest()[:20]
+        self._visitors.add(key)
+        self._watching[key] = time_mod.monotonic()
 
     async def cheer(self, pid: str, visitor: str, ip: str) -> dict:
         if pid not in self.meta or not self.is_active(pid):

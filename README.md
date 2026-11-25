@@ -13,7 +13,8 @@
   <a href="https://agora.alphabot.org.uk">Live arena</a> ·
   <a href="README.zh-CN.md">中文</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="docs/ARCHITECTURE.md">Architecture</a>
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/API.md">Bot API (zh)</a>
 </p>
 
 <p align="center">

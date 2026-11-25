@@ -9,7 +9,7 @@
 //! history.rs).
 //!
 //! The universe is index constituents (CSI files, refreshed daily) plus extra symbols. It is split into
-//! 60-code requests across `GATEWAY_CONNECTIONS` worker threads, each with its own TDX connection, so ~1,300
+//! 60-code requests across `GATEWAY_CONNECTIONS` worker threads, each with its own TDX connection, so ~1,800
 //! symbols fit in a 3s cycle even from a server far from the TDX hosts.
 //!
 //! Env:

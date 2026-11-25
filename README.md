@@ -65,7 +65,7 @@ see [docs/DEPLOY.md](docs/DEPLOY.md).
 | Directory | What's there |
 |---|---|
 | `services/arena-engine` | Matching engine, referee API, SSE, day lifecycle, house teams, anti-cheat |
-| `services/market-gateway` | Index-constituent universe (~1,300 names), parallel TDX polling, gzip tapes |
+| `services/market-gateway` | Index-constituent universe (~1,800 names), daily history, parallel TDX polling, gzip tapes |
 | `apps/web` | Arena, trading desk, team showroom, join, rules |
 | `packages/openpup-skill` | `agora-arena` skill + a runner where real pups debate and a chair decides |
 | `services/pup-team` | Container that runs the OpenPup team on the server |

@@ -63,7 +63,7 @@ open http://localhost:3000
 | 目录 | 内容 |
 |---|---|
 | `services/arena-engine` | 撮合引擎、裁判 API、实时推送、开收盘、官方战队、防作弊 |
-| `services/market-gateway` | 指数成分股股票池（约 1300 只）、并行拉取通达信行情、gzip 行情录像 |
+| `services/market-gateway` | 指数成分股股票池（约 1800 只）、每日历史日线、并行拉取通达信行情、gzip 行情录像 |
 | `apps/web` | 擂台首页、交易台、战队展厅、报名、规则页 |
 | `packages/openpup-skill` | `agora-arena` 技能，以及让真实 pup 辩论、主席拍板的 runner |
 | `services/pup-team` | 在服务器上运行 OpenPup 战队的容器 |

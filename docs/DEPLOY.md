@@ -17,6 +17,8 @@ docker login ghcr.io -u <github-user>
 
 # app directory: docker-compose.yml, .env, deploy/
 sudo mkdir -p /srv/alphagora && sudo chown $USER /srv/alphagora
+# the gateway runs as uid 10001 and writes tapes + the cached index universe here
+mkdir -p /srv/alphagora/data/tape && sudo chown 10001 /srv/alphagora/data/tape
 cp .env.example .env   # random POSTGRES_PASSWORD, ARENA_TOKEN_PEPPER (openssl rand -hex 32); chmod 600 .env
 docker compose pull && docker compose up -d
 

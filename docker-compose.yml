@@ -1,0 +1,119 @@
+# Agora — one-click self-hosting.
+#   cp .env.example .env && docker compose up -d --build          # demo market, playable right away
+#   ARENA_MARKET_FEED=redis docker compose --profile live up -d    # live quotes via rustdx (set GATEWAY_SYMBOLS)
+#   ./deploy/fetch-openpup.sh && docker compose --profile pup up -d  # OpenPup 宏观辩论团 driven by real pups
+name: agora
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agora}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-agora}
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agora} -d ${POSTGRES_DB:-agora}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["127.0.0.1:5432:5432"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # rustdx-complete (TDX protocol) -> Redis Stream md:l1 + daily JSONL tape in ./data/tape
+  market-gateway:
+    profiles: ["live"]
+    build:
+      context: .
+      dockerfile: services/market-gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      GATEWAY_SYMBOLS: ${GATEWAY_SYMBOLS:-}
+      POLL_MS: ${GATEWAY_POLL_MS:-3000}
+      TDX_SERVER: ${TDX_SERVER:-}
+    volumes:
+      - ./data/tape:/data/tape
+    depends_on:
+      redis: { condition: service_healthy }
+
+  arena-engine:
+    build:
+      context: .
+      dockerfile: services/arena-engine/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agora}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-agora}
+      REDIS_URL: redis://redis:6379/0
+      ARENA_MARKET_FEED: ${ARENA_MARKET_FEED:-demo}          # demo | redis | replay
+      ARENA_DEMO_SPEED: ${ARENA_DEMO_SPEED:-30}               # demo: one trading day ≈ 8 minutes
+      ARENA_SEASON_SLUG: ${ARENA_SEASON_SLUG:-}               # default: "demo" for demo, "s1-2026w" otherwise
+      ARENA_BENCHMARK_SYMBOL: ${ARENA_BENCHMARK_SYMBOL:-}     # default: 510300.SH live, 999300.SH demo
+      ARENA_DIVIDEND_SYMBOLS: ${ARENA_DIVIDEND_SYMBOLS:-}
+      ARENA_EXTERNAL_TEAMS: ${ARENA_EXTERNAL_TEAMS:-}         # teams whose rule bot is switched off
+      ARENA_PUP_TEAM_TOKEN: ${PUP_TEAM_TOKEN:-}               # set -> OpenPup 宏观辩论团 is driven by pup-team
+      ARENA_TOKEN_PEPPER: ${ARENA_TOKEN_PEPPER:?set ARENA_TOKEN_PEPPER in .env}
+      ARENA_CORS_ORIGINS: ${ARENA_CORS_ORIGINS:-*}
+      ARENA_REPLAY_PATH: ${ARENA_REPLAY_PATH:-}
+    volumes:
+      - ./data/tape:/data/tape:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    ports: ["127.0.0.1:8000:8000"]
+
+  # OpenPup 宏观辩论团: real pups debate, a chair decides. The OpenPup binary is not in the image:
+  # deploy/fetch-openpup.sh installs a GitHub release under /opt/openpup on the host, mounted read-only here.
+  pup-team:
+    profiles: ["pup"]
+    build:
+      context: .
+      dockerfile: services/pup-team/Dockerfile
+    restart: unless-stopped
+    environment:
+      AGORA_BASE_URL: http://arena-engine:8000/api/v1
+      AGORA_TOKEN: ${PUP_TEAM_TOKEN:-}
+      AGORA_INTERVAL: ${PUP_TEAM_INTERVAL:-300}
+      OPENPUP_API_KEY: ${OPENPUP_API_KEY:-}
+      OPENPUP_API_BASE: ${OPENPUP_API_BASE:-}
+      OPENPUP_MODEL: ${OPENPUP_MODEL:-}
+      OPENPUP_MINI_MODEL: ${OPENPUP_MINI_MODEL:-}
+      OPENPUP_LLM_PROVIDER: ${OPENPUP_LLM_PROVIDER:-}
+    volumes:
+      - ${OPENPUP_ROOT:-/opt/openpup}:/opt/openpup:ro
+      - pupdata:/data
+    depends_on:
+      arena-engine: { condition: service_healthy }
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_ARENA_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    depends_on:
+      arena-engine: { condition: service_healthy }
+    ports: ["127.0.0.1:3000:3000"]
+
+volumes:
+  pgdata:
+  redisdata:
+  pupdata:

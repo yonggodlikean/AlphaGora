@@ -1,0 +1,15 @@
+
+[api]
+fastapi>=0.115
+uvicorn[standard]>=0.32
+asyncpg>=0.30
+redis>=5.2
+pydantic>=2.9
+
+[dev]
+pytest>=8.3
+httpx>=0.27
+pgserver>=0.1.4
+
+[nautilus]
+nautilus_trader>=1.231

@@ -78,6 +78,13 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-weight: 700;
 .board-row { min-height: 52px; border-bottom: 1px solid #1f222b; color: var(--text); text-decoration: none; }
 .board-row:hover { background: #1c1f27; color: var(--text); }
 .scroll-x { overflow-x: auto; }
+.board-min { min-width: 640px; }
+/* Phones: rank · team · total return; the sparkline, excess and today columns go away. */
+@media (max-width: 640px) {
+  .board-min { min-width: 0; }
+  .board-head, .board-row { grid-template-columns: 28px minmax(0, 1fr) 84px; gap: 8px; padding: 10px 8px; }
+  .col-spark, .col-excess, .col-day { display: none; }
+}
 .r { text-align: right; }
 
 .toast { border-radius: 12px; padding: 12px 18px; font-weight: 700; border: 1px solid; }

@@ -73,9 +73,9 @@ export default function ArenaPage() {
           </div>
         </div>
         <div className="scroll-x">
-          <div style={{ minWidth: 640 }}>
+          <div className="board-min">
             <div className="board-head">
-              <span>名次</span><span>战队</span><span>走势</span><span className="r">累计收益</span><span className="r">比沪深300</span><span className="r">今日</span>
+              <span>名次</span><span>战队</span><span className="col-spark">走势</span><span className="r">累计收益</span><span className="r col-excess">比沪深300</span><span className="r col-day">今日</span>
             </div>
             {rows === null ? <p className="empty">加载中…</p> : null}
             {rows?.map((r) => <BoardLine key={r.portfolio_id} r={r} />)}
@@ -151,10 +151,10 @@ function BoardLine({ r }: { r: BoardRow }) {
           ) : null;
         })()}
       </span>
-      <Sparkline values={r.spark} color={bench ? "#9aa1ae" : r.cum_return >= 0 ? "#ff6b63" : "#3fcb8a"} dashed={bench} />
+      <span className="col-spark"><Sparkline values={r.spark} color={bench ? "#9aa1ae" : r.cum_return >= 0 ? "#ff6b63" : "#3fcb8a"} dashed={bench} /></span>
       <span className="r mono bold" style={{ fontSize: 15, color: bench ? "var(--muted)" : upColor(r.cum_return) }}>{pct(r.cum_return)}</span>
-      <span className="r mono" style={{ color: bench ? "var(--muted)" : upColor(r.excess_return) }}>{bench ? "—" : pct(r.excess_return)}</span>
-      <span className="r mono" style={{ color: upColor(r.day_return) }}>{arrow(r.day_return)}{pct(r.day_return)}</span>
+      <span className="r mono col-excess" style={{ color: bench ? "var(--muted)" : upColor(r.excess_return) }}>{bench ? "—" : pct(r.excess_return)}</span>
+      <span className="r mono col-day" style={{ color: upColor(r.day_return) }}>{arrow(r.day_return)}{pct(r.day_return)}</span>
     </Link>
   );
 }

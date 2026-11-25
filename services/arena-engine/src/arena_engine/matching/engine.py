@@ -303,6 +303,13 @@ class AShareMatchingEngine:
         self._cancel_limiter.record(key, now)
         return [self._terminate(order, OrderStatus.CANCELED, now, reason="user")]
 
+    def force_cancel(self, order_id: str, now: datetime, reason: str) -> ArenaEvent | None:
+        """Operator cancel (e.g. an account was banned): no rate limit, no ownership check."""
+        order = self._orders.get(order_id)
+        if order is None or not order.status.is_open:
+            return None
+        return self._terminate(order, OrderStatus.CANCELED, now, reason=reason)
+
     # ================================================================== market data
     def on_snapshot(self, snap: L1Snapshot) -> TickResult:
         """Apply one snapshot. Duplicate / out-of-order frames are ignored (idempotent tick processing)."""

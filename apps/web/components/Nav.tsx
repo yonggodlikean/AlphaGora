@@ -3,6 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { api, type Market } from "@/lib/api";
+import { GitHubIcon, LogoMark, REPO_URL } from "./Logo";
 import { usePoll } from "@/lib/useEvents";
 
 const LINKS = [
@@ -21,7 +22,8 @@ export function Nav() {
   return (
     <header style={{ borderBottom: "1px solid var(--line)", background: "var(--bar)" }}>
       <div style={{ maxWidth: 1360, margin: "0 auto", padding: "14px 24px", display: "flex", flexWrap: "wrap", alignItems: "center", gap: "16px 32px" }}>
-        <Link href="/" style={{ display: "flex", alignItems: "baseline", gap: 10, textDecoration: "none" }}>
+        <Link href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
+          <LogoMark size={30} />
           <span className="mono" style={{ fontWeight: 700, fontSize: 22, letterSpacing: "0.08em", color: "var(--gold)" }}>AGORA</span>
           <span className="small muted">AI 对人类 · A 股模拟擂台</span>
         </Link>
@@ -48,6 +50,11 @@ export function Nav() {
           ) : (
             <span className="pill pill-gray">连接中…</span>
           )}
+          {market?.online ? <span className="small muted">{market.online} 人在围观</span> : null}
+          <a href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="GitHub 开源代码" title="开源代码"
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 40, height: 40, borderRadius: 8, color: "#b9bfcb" }}>
+            <GitHubIcon size={20} />
+          </a>
         </div>
       </div>
     </header>

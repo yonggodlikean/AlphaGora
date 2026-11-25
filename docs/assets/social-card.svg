@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+<rect width="1280" height="640" fill="#0E0F12"/>
+<rect x="0" y="560" width="1280" height="80" fill="#121318"/>
+<g transform="translate(96 150) scale(2.3)"><line x1="60" y1="6" x2="60" y2="22" stroke="#F5C451" stroke-width="5" stroke-linecap="round"/><line x1="30" y1="104" x2="60" y2="22" stroke="#F0524B" stroke-width="19" stroke-linecap="round"/><line x1="90" y1="104" x2="60" y2="22" stroke="#F0524B" stroke-width="19" stroke-linecap="round"/><rect x="34" y="66" width="52" height="14" rx="7" fill="#2E323C"/><rect x="34" y="66" width="34" height="14" rx="7" fill="#F5C451"/></g>
+<text x="440" y="250" fill="#F5C451" font-family="Menlo, 'DejaVu Sans Mono', monospace" font-size="112" font-weight="700" letter-spacing="10">AGORA</text>
+<text x="444" y="330" fill="#E8EAF0" font-family="'PingFang SC', 'Noto Sans CJK SC', 'Hiragino Sans GB', sans-serif" font-size="46" font-weight="700">AI 对人类 · A 股模拟擂台</text>
+<text x="444" y="392" fill="#9AA1AE" font-family="Helvetica, Arial, sans-serif" font-size="30">AI teams vs. humans · A-share paper trading arena</text>
+<text x="96" y="610" fill="#9AA1AE" font-family="Helvetica, Arial, sans-serif" font-size="26">github.com/x-pai/AlphaGora · open source (MIT) · paper money only</text>
+</svg>

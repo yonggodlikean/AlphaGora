@@ -13,6 +13,7 @@ import asyncpg
 
 from .domain.models import Fill, Order, Position
 from .ledger.journal import Journal, fill_journal, funding_journal
+from .domain.errors import PublicError
 from .personas import PERSONAS
 
 ZERO = Decimal("0")
@@ -72,20 +73,143 @@ class Store:
 
     async def create_entrant(self, season_id: uuid.UUID, display_name: str, controller_type: str,
                              persona_tag: str | None, brief: str | None,
-                             token_prefix: str, token_hash: bytes) -> PortfolioMeta:
+                             token_prefix: str, token_hash: bytes, *, invite_code: str | None = None,
+                             require_invite: bool = False, seats: int | None = None,
+                             fingerprint: str | None = None) -> PortfolioMeta:
+        """Creates a participant + portfolio + token. With `require_invite`, the invite is checked, its use
+        counted and the seat cap enforced in the same transaction (the invite row is locked)."""
+        group = "human" if controller_type in ("human", "hybrid") else "ai"
+        group_types = ["human", "hybrid"] if group == "human" else ["openpup_ai", "external_bot"]
         async with self.pool.acquire() as conn, conn.transaction():
+            code = (invite_code or "").strip().upper() or None
+            if require_invite:
+                if not code:
+                    raise PublicError("INVITE_REQUIRED", "需要邀请码才能报名", 403)
+                inv = await conn.fetchrow("SELECT * FROM invites WHERE code = $1 FOR UPDATE", code)
+                if inv is None or inv["season_id"] != season_id or inv["revoked_at"] is not None:
+                    raise PublicError("INVITE_INVALID", "邀请码无效", 403)
+                if inv["kind"] != group:
+                    raise PublicError("INVITE_WRONG_KIND",
+                                      "这是" + ("真人" if inv["kind"] == "human" else "AI 战队") + "专用的邀请码", 403)
+                if inv["used"] >= inv["max_uses"]:
+                    raise PublicError("INVITE_USED_UP", "这个邀请码已经用完了", 403)
+            if seats is not None:
+                taken = await conn.fetchval(
+                    "SELECT count(*) FROM portfolios WHERE season_id = $1 AND NOT is_official AND status <> 'banned' "
+                    "AND controller_type::text = ANY($2::text[])", season_id, group_types)
+                if taken >= seats:
+                    raise PublicError("SEATS_FULL", f"本赛季{'真人' if group == 'human' else 'AI 战队'}名额已满（{seats}）", 403)
+            if await conn.fetchval("SELECT 1 FROM portfolios WHERE season_id = $1 AND name = $2", season_id, display_name):
+                raise PublicError("NAME_TAKEN", "这个名字已经有人用了", 409)
+            if require_invite:
+                await conn.execute("UPDATE invites SET used = used + 1 WHERE code = $1", code)
             participant = await conn.fetchval(
                 "INSERT INTO participants (display_name) VALUES ($1) RETURNING id", display_name)
             r = await conn.fetchrow(
-                "INSERT INTO portfolios (season_id, participant_id, name, persona_tag, controller_type, brief) "
-                "VALUES ($1, $2, $3, $4, $5::controller_type, $6) "
+                "INSERT INTO portfolios (season_id, participant_id, name, persona_tag, controller_type, brief, "
+                "invite_code, join_fingerprint) VALUES ($1, $2, $3, $4, $5::controller_type, $6, $7, $8) "
                 "RETURNING id, name, controller_type::text, is_official, is_benchmark, persona_tag, brief, created_at",
-                season_id, participant, display_name, persona_tag, controller_type, brief)
+                season_id, participant, display_name, persona_tag, controller_type, brief,
+                code if require_invite else None, fingerprint)
             await conn.execute(
                 "INSERT INTO api_tokens (portfolio_id, token_prefix, token_hash) VALUES ($1, $2, $3)",
                 r["id"], token_prefix, token_hash)
         return PortfolioMeta(str(r["id"]), r["name"], r["controller_type"], r["is_official"], r["is_benchmark"],
                              r["persona_tag"], r["brief"], r["created_at"])
+
+    # ------------------------------------------------------------------ launch: invites, status, moderation
+    async def seats_taken(self, season_id: uuid.UUID) -> dict[str, int]:
+        rows = await self.pool.fetch(
+            "SELECT CASE WHEN controller_type::text IN ('human', 'hybrid') THEN 'human' ELSE 'ai' END AS g, count(*) n "
+            "FROM portfolios WHERE season_id = $1 AND NOT is_official AND status <> 'banned' GROUP BY g", season_id)
+        out = {"human": 0, "ai": 0}
+        out.update({r["g"]: r["n"] for r in rows})
+        return out
+
+    async def create_invites(self, season_id: uuid.UUID, kind: str, count: int, max_uses: int,
+                             note: str | None) -> list[str]:
+        import secrets
+        alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"     # no 0/O, 1/I/L
+        codes = []
+        async with self.pool.acquire() as conn, conn.transaction():
+            for _ in range(count):
+                code = "AG-" + "".join(secrets.choice(alphabet) for _ in range(8))
+                await conn.execute(
+                    "INSERT INTO invites (code, season_id, kind, max_uses, note) VALUES ($1, $2, $3, $4, $5)",
+                    code, season_id, kind, max_uses, note)
+                codes.append(code)
+        return codes
+
+    async def list_invites(self, season_id: uuid.UUID) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            "SELECT code, kind, used, max_uses, note, revoked_at, created_at FROM invites "
+            "WHERE season_id = $1 ORDER BY created_at", season_id)
+
+    async def revoke_invite(self, code: str) -> bool:
+        return (await self.pool.execute(
+            "UPDATE invites SET revoked_at = now() WHERE code = $1 AND revoked_at IS NULL", code.upper())) != "UPDATE 0"
+
+    async def statuses(self, season_id: uuid.UUID) -> dict[str, tuple[str, str | None]]:
+        rows = await self.pool.fetch(
+            "SELECT id, status, status_reason FROM portfolios WHERE season_id = $1", season_id)
+        return {str(r["id"]): (r["status"], r["status_reason"]) for r in rows}
+
+    async def find_portfolio(self, season_id: uuid.UUID, ref: str) -> asyncpg.Record | None:
+        try:
+            pid = uuid.UUID(ref)
+            return await self.pool.fetchrow("SELECT * FROM portfolios WHERE id = $1", pid)
+        except ValueError:
+            return await self.pool.fetchrow("SELECT * FROM portfolios WHERE season_id = $1 AND name = $2", season_id, ref)
+
+    async def set_status(self, portfolio_id: uuid.UUID, status: str, reason: str | None) -> None:
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("UPDATE portfolios SET status = $2, status_reason = $3 WHERE id = $1",
+                               portfolio_id, status, reason)
+            if status == "banned":
+                await conn.execute("UPDATE api_tokens SET revoked_at = now() WHERE portfolio_id = $1 AND revoked_at IS NULL",
+                                   portfolio_id)
+
+    async def hidden_refs(self) -> set[str]:
+        return {f"{r['ref_type']}:{r['ref_id']}" for r in await self.pool.fetch("SELECT ref_type, ref_id FROM moderation")}
+
+    async def hide(self, ref_type: str, ref_id: uuid.UUID, reason: str | None) -> None:
+        await self.pool.execute(
+            "INSERT INTO moderation (ref_type, ref_id, reason) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            ref_type, ref_id, reason)
+
+    async def unhide(self, ref_type: str, ref_id: uuid.UUID) -> None:
+        await self.pool.execute("DELETE FROM moderation WHERE ref_type = $1 AND ref_id = $2", ref_type, ref_id)
+
+    async def shared_sources(self, season_id: uuid.UUID) -> list[asyncpg.Record]:
+        """Sign-ups that came from the same source (same IP fingerprint): candidates for multi-accounting."""
+        return await self.pool.fetch(
+            "SELECT join_fingerprint, array_agg(name ORDER BY created_at) AS names, count(*) AS n FROM portfolios "
+            "WHERE season_id = $1 AND join_fingerprint IS NOT NULL GROUP BY join_fingerprint HAVING count(*) > 1 "
+            "ORDER BY n DESC", season_id)
+
+    # ------------------------------------------------------------------ spectators
+    async def add_cheer(self, portfolio_id: str, day: date, visitor: str) -> bool:
+        res = await self.pool.execute(
+            "INSERT INTO cheers (portfolio_id, day, visitor) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            uuid.UUID(portfolio_id), day, visitor)
+        return res.endswith(" 1")
+
+    async def cheer_totals(self, portfolio_ids: list[str]) -> dict[str, int]:
+        rows = await self.pool.fetch(
+            "SELECT portfolio_id, count(*) n FROM cheers WHERE portfolio_id = ANY($1::uuid[]) GROUP BY portfolio_id",
+            [uuid.UUID(p) for p in portfolio_ids])
+        return {str(r["portfolio_id"]): r["n"] for r in rows}
+
+    async def save_visits(self, day: date, visitors: int) -> None:
+        await self.pool.execute(
+            "INSERT INTO visits (day, visitors) VALUES ($1, $2) ON CONFLICT (day) DO UPDATE "
+            "SET visitors = GREATEST(visits.visitors, EXCLUDED.visitors)", day, visitors)
+
+    async def visits(self, day: date) -> tuple[int, int]:
+        r = await self.pool.fetchrow(
+            "SELECT COALESCE(sum(visitors), 0) AS total, COALESCE(max(visitors) FILTER (WHERE day = $1), 0) AS today "
+            "FROM visits", day)
+        return int(r["today"]), int(r["total"])
 
     async def official_portfolio(self, season_id: uuid.UUID, persona_tag: str) -> PortfolioMeta | None:
         r = await self.pool.fetchrow(

@@ -22,3 +22,13 @@ class MarketDataError(ArenaError):
 
 class InvariantViolation(ArenaError):
     """Internal accounting invariant broken. Should never happen; the engine halts the affected portfolio."""
+
+
+class PublicError(ArenaError):
+    """A request refused for a reason the user should see (sign-up, moderation, account status)."""
+
+    def __init__(self, code: str, message: str, status: int = 422) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+        self.status = status

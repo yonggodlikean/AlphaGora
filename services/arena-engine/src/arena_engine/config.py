@@ -42,6 +42,16 @@ class Settings:
     # team also hands that team to its external driver (same effect as listing it in ARENA_EXTERNAL_TEAMS).
     team_tokens: tuple[tuple[str, str], ...] = field(default_factory=lambda: _team_tokens())
     online_window_s: int = field(default_factory=lambda: int(_env("ARENA_ONLINE_WINDOW", "600")))
+    # Sign-up: invite codes and per-season seat caps (official teams never count)
+    require_invite: bool = field(default_factory=lambda: _env("ARENA_REQUIRE_INVITE", "1") == "1")
+    seats_human: int = field(default_factory=lambda: int(_env("ARENA_SEATS_HUMAN", "100")))
+    seats_ai: int = field(default_factory=lambda: int(_env("ARENA_SEATS_AI", "20")))
+    # Extra blocked words for names / rationales / debates (UTF-8, one per line)
+    blocklist: str = field(default_factory=lambda: _env("ARENA_BLOCKLIST", ""))
+    # Order rate limits per account (official house teams are exempt)
+    orders_per_min_human: int = field(default_factory=lambda: int(_env("ARENA_ORDERS_PER_MIN_HUMAN", "20")))
+    orders_per_day_human: int = field(default_factory=lambda: int(_env("ARENA_ORDERS_PER_DAY_HUMAN", "500")))
+    orders_per_min_ai: int = field(default_factory=lambda: int(_env("ARENA_ORDERS_PER_MIN_AI", "60")))
     cors_origins: tuple[str, ...] = field(default_factory=lambda: tuple(
         s.strip() for s in _env("ARENA_CORS_ORIGINS", "*").split(",") if s.strip()))
     migrations_dir: Path = field(default_factory=lambda: Path(_env(

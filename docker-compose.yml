@@ -70,6 +70,10 @@ services:
       ARENA_DIVIDEND_SYMBOLS: ${ARENA_DIVIDEND_SYMBOLS:-}
       ARENA_EXTERNAL_TEAMS: ${ARENA_EXTERNAL_TEAMS:-}         # teams whose rule bot is switched off
       ARENA_PUP_TEAM_TOKEN: ${PUP_TEAM_TOKEN:-}               # set -> OpenPup 宏观辩论团 is driven by pup-team
+      ARENA_REQUIRE_INVITE: ${ARENA_REQUIRE_INVITE:-1}        # 0 = open sign-up (local play)
+      ARENA_SEATS_HUMAN: ${ARENA_SEATS_HUMAN:-100}
+      ARENA_SEATS_AI: ${ARENA_SEATS_AI:-20}
+      ARENA_BLOCKLIST: ${ARENA_BLOCKLIST:-}                   # extra blocked words file, e.g. /data/blocklist.txt
       ARENA_TOKEN_PEPPER: ${ARENA_TOKEN_PEPPER:?set ARENA_TOKEN_PEPPER in .env}
       ARENA_CORS_ORIGINS: ${ARENA_CORS_ORIGINS:-*}
       ARENA_REPLAY_PATH: ${ARENA_REPLAY_PATH:-}

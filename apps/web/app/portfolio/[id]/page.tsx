@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useState } from "react";
 import { Avatar } from "@/components/Avatar";
+import { HeartIcon } from "@/components/Logo";
 import { api, type Profile, type TimelineItem, type TimelineOrder } from "@/lib/api";
 import { driverLabel, GROUP_TAG, int, lots, mmdd, hhmm, pct, STANCE, upColor, yuan } from "@/lib/format";
 import { usePoll } from "@/lib/useEvents";
@@ -40,6 +41,20 @@ export default function PortfolioPage() {
   const [items, setItems] = useState<TimelineItem[] | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [missing, setMissing] = useState(false);
+  const [cheering, setCheering] = useState<"idle" | "busy" | "done">("idle");
+  const [cheerMsg, setCheerMsg] = useState<string | null>(null);
+  async function cheer() {
+    setCheering("busy");
+    try {
+      const r = await api<{ cheers: number; new: boolean }>(`/api/v1/portfolios/${id}/cheer`, { method: "POST" });
+      setP((x) => (x ? { ...x, cheers: r.cheers } : x));
+      setCheerMsg(r.new ? "加油成功！" : "今天已经给 TA 加过油了，明天再来");
+    } catch (e) {
+      setCheerMsg((e as Error).message);
+    } finally {
+      setCheering("done");
+    }
+  }
 
   const load = useCallback(() => {
     api<Profile>(`/api/v1/portfolios/${id}`).then(setP).catch((e) => { if (e.status === 404) setMissing(true); });
@@ -63,6 +78,12 @@ export default function PortfolioPage() {
 
   return (
     <main className="wrap">
+      {p.status !== "active" ? (
+        <div className="toast toast-bad" role="status">
+          {p.status === "banned" ? "这个账号因违反擂台规则已被封禁，不参与排名。" : "这个账号已被暂停交易，暂不参与排名。"}
+          <Link href="/about#rules" style={{ marginLeft: 8 }}>擂台规则</Link>
+        </div>
+      ) : null}
       <section className="card" aria-label="战队人设" style={{ display: "flex", flexWrap: "wrap", gap: 24, alignItems: "flex-start", padding: 24, borderRadius: 16 }}>
         <Avatar glyph={p.glyph} color={p.color} />
         <div className="stack" style={{ flex: "999 1 420px", minWidth: 0, gap: 10 }}>
@@ -91,6 +112,13 @@ export default function PortfolioPage() {
           <span className="small muted">当前名次</span>
           <span className="mono bold" style={{ fontSize: 44, color: "var(--gold)", lineHeight: 1 }}>{p.rank ? `#${p.rank}` : "基准"}</span>
           <span className="mono small muted">总资产 ¥{yuan(p.equity)}</span>
+          {p.status === "active" ? (
+            <button type="button" className="btn" onClick={cheer} disabled={cheering === "busy"}
+              style={{ marginTop: 8, color: "var(--up-soft)", borderColor: "#6b2a2a" }}>
+              <HeartIcon size={16} filled={cheering === "done"} /> 为 TA 加油 · {p.cheers}
+            </button>
+          ) : null}
+          {cheerMsg ? <span className="small muted" role="status">{cheerMsg}</span> : null}
         </div>
       </section>
 

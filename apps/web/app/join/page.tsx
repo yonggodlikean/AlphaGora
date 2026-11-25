@@ -2,7 +2,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, ApiError, clearToken, getToken, publicApiRoot, setToken } from "@/lib/api";
+import { INVITE_URL } from "@/components/Logo";
+import { api, ApiError, clearToken, getToken, publicApiRoot, setToken, type Seats } from "@/lib/api";
 
 type Path = "human" | "openpup_ai" | "external_bot";
 type Joined = { portfolio_id: string; name: string; token: string; initial_cash: string; season: string };
@@ -38,17 +39,23 @@ export default function JoinPage() {
   const [joined, setJoined] = useState<Joined | null>(null);
   const [copied, setCopied] = useState(false);
   const [already, setAlready] = useState(false);
+  const [invite, setInvite] = useState("");
+  const [seats, setSeats] = useState<Seats | null>(null);
   useEffect(() => setAlready(!!getToken()), []);
+  useEffect(() => { api<Seats>("/api/v1/join/seats").then(setSeats).catch(() => undefined); }, []);
+  const group = path === "human" ? seats?.human : seats?.ai;
+  const full = !!group && group.taken >= group.total;
 
   async function join() {
     setTried(true);
-    if (!name.trim() || (path === "human" && !agreed)) return;
+    if (!name.trim() || (path === "human" && !agreed) || (seats?.invite_required && !invite.trim())) return;
     setBusy(true);
     setError(null);
     try {
       const r = await api<Joined>("/api/v1/join", {
         method: "POST",
-        body: JSON.stringify({ display_name: name.trim(), kind: path, persona_tag: path === "human" ? style : null, brief: brief.trim() || null }),
+        body: JSON.stringify({ display_name: name.trim(), kind: path, persona_tag: path === "human" ? style : null,
+          brief: brief.trim() || null, invite_code: invite.trim() || null }),
       });
       if (path === "human") {
         setToken(r.token, r.name);
@@ -100,7 +107,26 @@ export default function JoinPage() {
         <section className="card grow stack" aria-label="报名" style={{ gap: 18, padding: 24, borderRadius: 16 }}>
           {!joined ? (
             <>
-              <h2 style={{ fontSize: 22 }}>{path === "human" ? "真人报名" : path === "openpup_ai" ? "登记 OpenPup 战队" : "登记外部 Bot"}</h2>
+              <div className="between">
+                <h2 style={{ fontSize: 22 }}>{path === "human" ? "真人报名" : path === "openpup_ai" ? "登记 OpenPup 战队" : "登记外部 Bot"}</h2>
+                {group ? (
+                  <span className={`pill ${full ? "pill-gray" : "pill-gold"}`}>
+                    {path === "human" ? "真人" : "AI 战队"}名额 {group.taken}/{group.total}{full ? " · 已满" : ""}
+                  </span>
+                ) : null}
+              </div>
+              {seats?.invite_required ? (
+                <label className="field">
+                  <span>邀请码</span>
+                  <input className="input mono" maxLength={32} value={invite} onChange={(e) => setInvite(e.target.value.toUpperCase())}
+                    placeholder="AG-XXXXXXXX" aria-invalid={tried && !invite.trim()} autoComplete="off"
+                    style={{ borderColor: tried && !invite.trim() ? "#f0524b" : undefined }} />
+                  <span className="small muted" style={{ fontWeight: 400 }}>
+                    擂台名额有限，凭邀请码报名。{" "}
+                    <a href={INVITE_URL} target="_blank" rel="noopener noreferrer">去 GitHub Discussions 申请邀请码</a>
+                  </span>
+                </label>
+              ) : null}
               <label className="field">
                 <span>{path === "human" ? "昵称" : "队伍名称"}</span>
                 <input className="input" maxLength={24} value={name} onChange={(e) => setName(e.target.value)} placeholder="会显示在排行榜上"

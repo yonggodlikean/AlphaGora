@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useState } from "react";
+import { HeartIcon } from "@/components/Logo";
 import { Sparkline } from "@/components/Sparkline";
 import { api, type BoardRow, type Feed, type OrderView } from "@/lib/api";
 import { arrow, driverLabel, GROUP_TAG, hhmm, int, lots, pct, upColor } from "@/lib/format";
@@ -138,6 +139,11 @@ function BoardLine({ r }: { r: BoardRow }) {
       <span style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <span className="bold" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
         <span className={`tag ${tag.cls}`}>{tag.label}</span>
+        {r.cheers ? (
+          <span title={`${r.cheers} 次加油`} style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 3, fontSize: 12, color: "var(--up-soft)" }}>
+            <HeartIcon size={12} filled />{r.cheers}
+          </span>
+        ) : null}
         {(() => {
           const d = driverLabel(r.driver);
           return d ? (

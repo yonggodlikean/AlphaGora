@@ -24,7 +24,7 @@ import asyncpg
 from .config import Settings
 from .domain import events as ev
 from .domain.enums import ControllerType, Liquidity, OrderStatus, OrderType, RejectCode, Side
-from .domain.errors import ArenaError, MarketDataError, OrderRejected
+from .domain.errors import ArenaError, MarketDataError, OrderRejected, PublicError
 from .domain.events import ArenaEvent
 from .domain.models import Fill, Order, OrderRequest, Position
 from .house_bots import HouseBots, Intent, MarketView
@@ -32,6 +32,8 @@ from .market.calendar import CST, TradingCalendar
 from .market.demo import DemoFeed, EndOfDay
 from .market.feed import RedisStreamFeed, ReplayFeed
 from .market.snapshot import L1Snapshot
+from .matching.rate_limit import SlidingWindowLimiter
+from .moderation import ContentFilter
 from .matching import AShareMatchingEngine
 from .matching.fees import money
 from .personas import BADGE_BY_CODE, BADGES, BY_TAG
@@ -47,6 +49,7 @@ Q8 = Decimal("0.00000001")
 PUBLIC_EVENTS = {ev.MARKET_OPEN, ev.MARKET_CLOSE, ev.ORDER_FILLED, ev.LIMIT_UP_BROKEN, ev.LIMIT_UP_SEALED,
                  ev.LIMIT_DOWN_BROKEN, ev.CONFLICT_DETECTED, "badge.awarded", "roast.daily"}
 CONFLICT_WINDOW = timedelta(minutes=30)
+HIDDEN_TEXT = "（该内容已被管理员隐藏）"
 
 
 def _dec(x: float | Decimal) -> Decimal:
@@ -80,6 +83,16 @@ class ArenaService:
         self._token_cache: dict[bytes, str] = {}
         self._summaries: dict[str, str] = {}
         self._pending_restore: list = []
+        self.filter = ContentFilter(Path(settings.blocklist) if settings.blocklist else None)
+        self.status: dict[str, tuple[str, str | None]] = {}
+        self.hidden: set[str] = set()
+        self.cheers: dict[str, int] = {}
+        self._visitors: set[str] = set()
+        self._visitors_day: date | None = None
+        self._visitors_saved = 0
+        self._cheer_ip: dict[str, tuple[date, int]] = {}
+        self._order_day: dict[str, tuple[date, int]] = {}
+        self._limiters: dict[int, SlidingWindowLimiter] = {}
         self.last_seen: dict[str, tuple[datetime, str | None]] = {}
         self._last_seen_written: dict[str, datetime] = {}   # house order id -> decision summary (for conflict cards)
         self._join_hits: dict[str, deque] = {}
@@ -113,12 +126,16 @@ class ArenaService:
             elif await self.store.assign_token(meta.id, raw[:8], self.hash_token(raw)):
                 log.info("pre-shared token now drives %s (season %s)", meta.name, self.season["slug"])
         self.last_seen = await self.store.last_seen(self.season_id)
+        self.status = await self.store.statuses(self.season_id)
+        self.hidden = await self.store.hidden_refs()
+        self.cheers = await self.store.cheer_totals(list(self.meta))
         self.bots = HouseBots(teams, self.settings.resolved_benchmark(), self.settings.resolved_dividend_symbols())
         for pid in self.meta:
             if await self.store.has_badge(pid, "first_trade"):
                 self._first_trade_done.add(pid)
         if self.settings.auto_start_feed:
             await self.start_feed()
+            self._tasks.append(asyncio.create_task(self._run_housekeeping(), name="housekeeping"))
 
     async def _load_portfolios(self) -> None:
         metas = await self.store.portfolios(self.season_id)
@@ -225,7 +242,8 @@ class ArenaService:
         return {"trading": trading, "day_open": self.engine.day_open,
                 "trade_date": None if self.engine.trade_date is None else self.engine.trade_date.isoformat(),
                 "clock": now.astimezone(CST).strftime("%H:%M:%S"), "now": now.isoformat(),
-                "simulated": self.settings.is_simulated_clock, "feed": self.settings.market_feed}
+                "simulated": self.settings.is_simulated_clock, "feed": self.settings.market_feed,
+                "online": self.bus.subscribers, "visitors_today": len(self._visitors)}
 
     # ================================================================== market data
     async def on_snapshot(self, snap: L1Snapshot) -> None:
@@ -308,6 +326,103 @@ class ArenaService:
         await self.store.expire_orders(expired, "engine_restart")
         if restored or expired:
             log.info("restart: restored %d open orders, expired %d", restored, len(expired))
+
+    async def _run_housekeeping(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await self.refresh_controls()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("housekeeping failed")
+
+    async def refresh_controls(self) -> None:
+        """Picks up admin actions made with `python -m arena_engine.admin` (status, hidden content) and persists
+        visitor counts. A suspended or banned account loses its open orders immediately."""
+        statuses = await self.store.statuses(self.season_id)
+        newly_blocked = [pid for pid, (st, _) in statuses.items()
+                         if st != "active" and self.status.get(pid, ("active", None))[0] == "active"]
+        self.status = statuses
+        self.hidden = await self.store.hidden_refs()
+        if newly_blocked:
+            async with self.lock:
+                events = []
+                for pid in newly_blocked:
+                    for o in self.engine.open_orders():
+                        if o.portfolio_id == pid:
+                            e = self.engine.force_cancel(o.id, self.now(), "account_" + statuses[pid][0])
+                            if e:
+                                events.append(e)
+                    self._token_cache = {h: p for h, p in self._token_cache.items() if p != pid}
+                    log.warning("%s is now %s (%s)", self._name(pid), statuses[pid][0], statuses[pid][1])
+                if events:
+                    await self._handle([], events, cancel_reasons={e.payload["order_id"]: e.payload.get("reason") for e in events})
+        if self._visitors_day and len(self._visitors) != self._visitors_saved:
+            await self.store.save_visits(self._visitors_day, len(self._visitors))
+            self._visitors_saved = len(self._visitors)
+
+    def is_active(self, pid: str) -> bool:
+        return self.status.get(pid, ("active", None))[0] == "active"
+
+    def _blocked(self, text: str | None) -> None:
+        reason = self.filter.check(text)
+        if reason:
+            raise PublicError("CONTENT_BLOCKED", reason, 422)
+
+    def _limiter(self, n: int) -> SlidingWindowLimiter:
+        if n not in self._limiters:
+            self._limiters[n] = SlidingWindowLimiter(n, timedelta(minutes=1))
+        return self._limiters[n]
+
+    def _check_order_rate(self, pid: str) -> None:
+        m = self.meta[pid]
+        if m.is_official:
+            return
+        human = m.controller_type in ("human", "hybrid")
+        per_min = self.settings.orders_per_min_human if human else self.settings.orders_per_min_ai
+        now = datetime.now(CST)
+        lim = self._limiter(per_min)
+        if not lim.allowed((pid,), now):
+            raise OrderRejected(RejectCode.RATE_LIMITED, f"下单太快了：每分钟最多 {per_min} 单")
+        day, n = self._order_day.get(pid, (now.date(), 0))
+        if day != now.date():
+            day, n = now.date(), 0
+        if human and n >= self.settings.orders_per_day_human:
+            raise OrderRejected(RejectCode.RATE_LIMITED, f"今天已经下了 {n} 单，明天再来")
+        lim.record((pid,), now)
+        self._order_day[pid] = (day, n + 1)
+
+    def track_visit(self, visitor: str) -> None:
+        today = datetime.now(CST).date()
+        if self._visitors_day != today:
+            self._visitors_day, self._visitors, self._visitors_saved = today, set(), 0
+        self._visitors.add(hashlib.sha256((self.settings.token_pepper + "|v|" + visitor).encode()).hexdigest()[:20])
+
+    async def cheer(self, pid: str, visitor: str, ip: str) -> dict:
+        if pid not in self.meta or not self.is_active(pid):
+            raise PublicError("NOT_FOUND", "没有这支队伍", 404)
+        today = datetime.now(CST).date()
+        day, n = self._cheer_ip.get(ip, (today, 0))
+        if day != today:
+            day, n = today, 0
+        if n >= 60:
+            raise PublicError("RATE_LIMITED", "今天加油次数太多了，明天再来", 429)
+        key = hashlib.sha256((self.settings.token_pepper + "|c|" + visitor).encode()).hexdigest()[:24]
+        added = await self.store.add_cheer(pid, today, key)
+        if added:
+            self._cheer_ip[ip] = (day, n + 1)
+            self.cheers[pid] = self.cheers.get(pid, 0) + 1
+        return {"portfolio_id": pid, "cheers": self.cheers.get(pid, 0), "cheered_today": True, "new": added}
+
+    def seats(self) -> dict:
+        human = sum(1 for p, m in self.meta.items()
+                    if not m.is_official and m.controller_type in ("human", "hybrid") and self.status.get(p, ("active",))[0] != "banned")
+        ai = sum(1 for p, m in self.meta.items()
+                 if not m.is_official and m.controller_type not in ("human", "hybrid") and self.status.get(p, ("active",))[0] != "banned")
+        return {"invite_required": self.settings.require_invite,
+                "human": {"taken": human, "total": self.settings.seats_human},
+                "ai": {"taken": ai, "total": self.settings.seats_ai}}
 
     async def close_day(self) -> None:
         async with self.lock:
@@ -466,7 +581,7 @@ class ArenaService:
         thesis = self._thesis_of(order)
         out = []
         now = f.executed_at
-        for (ts, sym, side, pid, qty, th) in reversed(self.recent_fills):
+        for (ts, sym, side, pid, qty, th, oid) in reversed(self.recent_fills):
             if now - ts > CONFLICT_WINDOW:
                 break
             if sym != f.symbol or pid == f.portfolio_id or side == f.side:
@@ -479,13 +594,15 @@ class ArenaService:
             self._conflicts_seen[key] = now
             b_qty, s_qty = (f.qty, qty) if f.side is Side.BUY else (qty, f.qty)
             b_th, s_th = (thesis, th) if f.side is Side.BUY else (th, thesis)
+            b_oid, s_oid = (f.order_id, oid) if f.side is Side.BUY else (oid, f.order_id)
             out.append((ev.CONFLICT_DETECTED, sym, {
                 "symbol": sym, "symbol_name": self.names.get(sym, sym), "ts": now.isoformat(),
                 "buyer_id": buyer, "buyer": self._name(buyer), "buy_qty": b_qty, "buy_thesis": b_th,
                 "seller_id": seller, "seller": self._name(seller), "sell_qty": s_qty, "sell_thesis": s_th,
+                "buy_order_id": b_oid, "sell_order_id": s_oid,
             }))
             break
-        self.recent_fills.append((now, f.symbol, f.side, f.portfolio_id, f.qty, thesis))
+        self.recent_fills.append((now, f.symbol, f.side, f.portfolio_id, f.qty, thesis, f.order_id))
         return out
 
     def _thesis_of(self, order) -> str:
@@ -502,6 +619,8 @@ class ArenaService:
             price=None if body.get("price") in (None, "") else Decimal(str(body["price"])),
             thesis=body.get("thesis") or None, debate_id=body.get("debate_id") or None,
         )
+        if not self.is_active(portfolio_id):
+            raise PublicError("ACCOUNT_SUSPENDED", "这个账号已被暂停交易：" + (self.status[portfolio_id][1] or "违反擂台规则"), 403)
         async with self.lock:
             existing = await self.store.order_by_key(portfolio_id, req.idempotency_key)
             if existing is not None:
@@ -512,6 +631,8 @@ class ArenaService:
                 return (live.public_view() if live else _row_view(existing)) | {"duplicate": True}
             if req.debate_id and await self.store.debate_owner(req.debate_id) != portfolio_id:
                 raise OrderRejected(RejectCode.THESIS_REQUIRED, "debate_id not found for this portfolio")
+            self._blocked(req.thesis)
+            self._check_order_rate(portfolio_id)
             res = self.engine.submit_order(req, self.now())
             if summary:
                 self._summaries[res.order.id] = summary
@@ -526,6 +647,14 @@ class ArenaService:
             return self.engine.order(order_id).public_view()
 
     async def submit_debate(self, portfolio_id: str, body: dict) -> dict:
+        if not self.meta[portfolio_id].is_official:
+            if not self.is_active(portfolio_id):
+                raise PublicError("ACCOUNT_SUSPENDED", "这个账号已被暂停交易", 403)
+            for r in body["rounds"]:
+                self._blocked(r.get("argument"))
+                self._blocked(r.get("role"))
+            fd = body.get("final_decision") or {}
+            self._blocked(str(fd.get("title") or "") + " " + str(fd.get("summary") or ""))
         res = await self.store.create_debate(portfolio_id, body["symbol"], body["rounds"], body["final_decision"],
                                              body.get("execution_trace"), body.get("execution_trace_hash"))
         res["created_at"] = res["created_at"].isoformat()
@@ -572,7 +701,9 @@ class ArenaService:
             pid = await self.store.portfolio_for_token(h)
             if pid:
                 self._token_cache[h] = pid
-        return pid if pid in self.meta else None
+        if pid not in self.meta or self.status.get(pid, ("active",))[0] == "banned":
+            return None
+        return pid
 
     async def touch(self, pid: str, driver_name: str | None = None) -> None:
         """Record that an external driver is alive. Wall clock on purpose (liveness, not market time)."""
@@ -609,13 +740,21 @@ class ArenaService:
         return True
 
     async def join(self, display_name: str, controller_type: str, persona_tag: str | None,
-                   brief: str | None) -> dict:
+                   brief: str | None, invite_code: str | None = None, client_ip: str | None = None) -> dict:
+        for text in (display_name, brief, persona_tag):
+            self._blocked(text)
         raw = "agk_" + secrets.token_urlsafe(24)
+        human = controller_type in ("human", "hybrid")
+        fingerprint = None if not client_ip else hashlib.sha256(
+            (self.settings.token_pepper + "|ip|" + client_ip).encode()).hexdigest()[:24]
         try:
-            meta = await self.store.create_entrant(self.season_id, display_name, controller_type, persona_tag, brief,
-                                                   raw[:8], self.hash_token(raw))
+            meta = await self.store.create_entrant(
+                self.season_id, display_name, controller_type, persona_tag, brief, raw[:8], self.hash_token(raw),
+                invite_code=invite_code, require_invite=self.settings.require_invite,
+                seats=self.settings.seats_human if human else self.settings.seats_ai, fingerprint=fingerprint)
         except asyncpg.UniqueViolationError:
-            raise ArenaError("NAME_TAKEN") from None
+            raise PublicError("NAME_TAKEN", "这个名字已经有人用了", 409) from None
+        self.status[meta.id] = ("active", None)
         async with self.lock:
             await self._open_engine_account(meta, Decimal(self.season["initial_cash"]), {})
         return {"portfolio_id": meta.id, "name": meta.name, "token": raw,
@@ -651,6 +790,8 @@ class ArenaService:
         today = self.engine.trade_date
         rows = []
         for pid, m in self.meta.items():
+            if not self.is_active(pid):
+                continue
             g = self._group(m)
             if group == "ai" and g not in ("official_ai", "community_ai", "benchmark"):
                 continue
@@ -664,7 +805,7 @@ class ArenaService:
             spark = [float(h["cum_return"]) for h in hist[-19:]] + [cum]
             rows.append({"portfolio_id": pid, "name": m.name, "group": g, "persona_tag": m.persona_tag,
                          "cum_return": cum, "excess_return": cum - bench, "day_return": float(eq / prev - 1),
-                         "driver": self.driver(pid),
+                         "driver": self.driver(pid), "cheers": self.cheers.get(pid, 0),
                          "equity": str(money(eq)), "spark": [0.0] + spark if len(spark) == 1 else spark})
         rows.sort(key=lambda r: r["cum_return"], reverse=True)
         place = 0
@@ -738,9 +879,18 @@ class ArenaService:
         return out
 
     async def arena_feed(self) -> dict:
-        conflicts = await self.store.latest_events(self.season_id, ev.CONFLICT_DETECTED, 6)
+        conflicts = []
+        for c in await self.store.latest_events(self.season_id, ev.CONFLICT_DETECTED, 12):
+            d = c["data"]
+            if not (self.is_active(d.get("buyer_id", "")) and self.is_active(d.get("seller_id", ""))):
+                continue
+            if f"order:{d.get('buy_order_id')}" in self.hidden:
+                d["buy_thesis"] = HIDDEN_TEXT
+            if f"order:{d.get('sell_order_id')}" in self.hidden:
+                d["sell_thesis"] = HIDDEN_TEXT
+            conflicts.append(d)
         roast = await self.store.latest_events(self.season_id, "roast.daily", 1)
-        return {"conflicts": [c["data"] for c in conflicts], "roast": roast[0]["data"] if roast else None,
+        return {"conflicts": conflicts[:6], "roast": roast[0]["data"] if roast else None,
                 "queues": self.queues(), "market": self.market_status(),
                 "season": {"slug": self.season["slug"], "name": self.season["name"],
                            "trading_days": len({h["trade_date"] for hs in self.history.values() for h in hs})
@@ -748,7 +898,9 @@ class ArenaService:
 
     def rank_info(self, pid: str) -> dict:
         board = self.leaderboard("all")
-        me = next(r for r in board if r["portfolio_id"] == pid)
+        me = next((r for r in board if r["portfolio_id"] == pid), None)
+        if me is None:   # suspended / banned: off the board
+            return {"rank": None, "cum_return": 0.0, "beaten_ai": 0, "ai_total": 0, "chase": None}
         ai = [r for r in board if r["group"] in ("official_ai", "community_ai")]
         above = [r for r in ai if r["cum_return"] > me["cum_return"]]
         target = min(above, key=lambda r: r["cum_return"]) if above else None
@@ -768,7 +920,11 @@ class ArenaService:
     async def profile(self, pid: str) -> dict:
         m = self.meta[pid]
         board = self.leaderboard("all")
-        me = next(r for r in board if r["portfolio_id"] == pid)
+        me = next((r for r in board if r["portfolio_id"] == pid), None)
+        if me is None:
+            eq0, _, _ = self.equity(pid)
+            cum0 = float(eq0 / self.engine.accounts[pid].initial_cash - 1)
+            me = {"rank": None, "cum_return": cum0, "excess_return": cum0 - self.benchmark_return()}
         hist = self.history.get(pid, [])
         eq, cash, _ = self.equity(pid)
         initial = self.engine.accounts[pid].initial_cash
@@ -805,6 +961,8 @@ class ArenaService:
             "positions": positions,
             "roast_line": (roast[0]["data"].get("lines", {}).get(pid) if roast else None),
             "driver": self.driver(pid),
+            "cheers": self.cheers.get(pid, 0),
+            "status": self.status.get(pid, ("active", None))[0],
         }
 
     async def timeline(self, pid: str) -> list[dict]:
@@ -818,6 +976,11 @@ class ArenaService:
                              queue_progress_pct=lo.queue_progress_pct,
                              avg_fill_price=None if lo.avg_fill_price is None else str(lo.avg_fill_price),
                              fees_paid=str(lo.fees_paid))
+                if f"order:{o['order_id']}" in self.hidden:
+                    o["thesis"] = HIDDEN_TEXT
+            if it["kind"] == "debate" and f"debate:{it['id']}" in self.hidden:
+                it["rounds"] = [r | {"argument": HIDDEN_TEXT} for r in it["rounds"]]
+                it["final_decision"] = {**it["final_decision"], "title": "（已隐藏）", "summary": HIDDEN_TEXT}
         return items
 
     async def my_orders(self, pid: str) -> list[dict]:

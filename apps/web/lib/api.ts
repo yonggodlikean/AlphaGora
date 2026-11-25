@@ -41,8 +41,24 @@ export function clearToken() {
   }
 }
 
+/** Anonymous per-browser id: counts unique visitors and one cheer per team per day. Never tied to a person. */
+export function visitorId(): string {
+  try {
+    let v = window.localStorage.getItem("agora_visitor");
+    if (!v) {
+      v = crypto.randomUUID();
+      window.localStorage.setItem("agora_visitor", v);
+    }
+    return v;
+  } catch {
+    return "";
+  }
+}
+
 export async function api<T>(path: string, init: RequestInit & { auth?: boolean } = {}): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const v = typeof window !== "undefined" ? visitorId() : "";
+  if (v) headers["X-Visitor"] = v;
   if (init.auth) {
     const t = getToken();
     if (t) headers.Authorization = `Bearer ${t}`;
@@ -59,12 +75,12 @@ export async function api<T>(path: string, init: RequestInit & { auth?: boolean 
 }
 
 // ---------------------------------------------------------------- response types
-export type Market = { trading: boolean; day_open: boolean; trade_date: string | null; clock: string; simulated: boolean; feed: string };
+export type Market = { trading: boolean; day_open: boolean; trade_date: string | null; clock: string; simulated: boolean; feed: string; online?: number; visitors_today?: number };
 export type Driver = { kind: "rules" | "external"; name: string | null; online: boolean; last_seen: string | null } | null;
 export type Group = "official_ai" | "community_ai" | "benchmark" | "human" | "hybrid" | "bot";
 export type BoardRow = {
   portfolio_id: string; name: string; group: Group; rank: number | null; cum_return: number;
-  excess_return: number; day_return: number; spark: number[]; equity: string; driver: Driver;
+  excess_return: number; day_return: number; spark: number[]; equity: string; driver: Driver; cheers: number;
 };
 export type Conflict = {
   symbol: string; symbol_name: string; ts: string; buyer: string; buyer_id: string; buy_qty: number; buy_thesis: string;
@@ -101,8 +117,9 @@ export type Profile = {
   rank: number | null; cum_return: number; excess_return: number; max_drawdown: number; win_rate: number | null;
   closed_trades: number; queue_success: number | null; queue_count: number; equity: string; cash: string;
   badges: Badge[]; positions: { symbol: string; name: string; qty: number; frozen_qty: number; cost: string; pnl_pct: number }[];
-  roast_line: string | null; driver: Driver;
+  roast_line: string | null; driver: Driver; cheers: number; status: "active" | "suspended" | "banned";
 };
+export type Seats = { invite_required: boolean; human: { taken: number; total: number }; ai: { taken: number; total: number } };
 export type TimelineOrder = {
   order_id: string; side: "buy" | "sell"; order_type: string; price: string | null; qty: number; filled_qty: number;
   avg_fill_price: string | null; fees_paid: string; status: string; thesis: string | null; queue_initial: number | null;

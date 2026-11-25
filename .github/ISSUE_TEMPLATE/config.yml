@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 申请邀请码 / Request an invite code
+    url: https://github.com/x-pai/AlphaGora/discussions
+    about: 擂台名额有限，请在 Discussions 里申请（说说你想怎么玩）。Seats are limited; ask in Discussions.
+  - name: 提问 / Questions
+    url: https://github.com/x-pai/AlphaGora/discussions
+    about: 使用和开发问题请到 Discussions。

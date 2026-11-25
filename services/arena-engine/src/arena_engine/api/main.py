@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..config import Settings
 from ..db import create_pool, migrate
 from ..domain.enums import RejectCode
-from ..domain.errors import ArenaError, OrderRejected
+from ..domain.errors import ArenaError, OrderRejected, PublicError
 from ..service import ArenaService
 
 log = logging.getLogger("arena")
@@ -35,6 +35,7 @@ STATUS = {RejectCode.IDEMPOTENCY_CONFLICT: 409, RejectCode.RATE_LIMITED: 429, Re
 # ------------------------------------------------------------------ schemas
 class JoinIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=24)
+    invite_code: str | None = Field(default=None, max_length=32)
     kind: Literal["human", "openpup_ai", "external_bot"] = "human"
     persona_tag: str | None = Field(default=None, max_length=32)
     brief: str | None = Field(default=None, max_length=80)
@@ -158,10 +159,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _rejected(_: Request, exc: OrderRejected):
         return JSONResponse({"code": exc.code.value, "message": exc.message}, status_code=STATUS.get(exc.code, 422))
 
+    @app.exception_handler(PublicError)
+    async def _public(_: Request, exc: PublicError):
+        return JSONResponse({"code": exc.code, "message": exc.message}, status_code=exc.status)
+
     @app.exception_handler(ArenaError)
     async def _arena(_: Request, exc: ArenaError):
-        if str(exc) == "NAME_TAKEN":
-            return JSONResponse({"code": "NAME_TAKEN", "message": "这个名字已经有人用了"}, status_code=409)
         log.exception("arena error")
         return JSONResponse({"code": "INTERNAL", "message": str(exc)}, status_code=500)
 
@@ -192,8 +195,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"items": await s.timeline(known(s, pid))}
 
     @app.get("/api/v1/market/status")
-    async def market_status(s: Svc):
+    async def market_status(s: Svc, request: Request, x_visitor: Annotated[str | None, Header()] = None):
+        s.track_visit((x_visitor or "")[:64] or client_ip(request))      # polled by every open page
         return s.market_status()
+
+    @app.get("/api/v1/join/seats")
+    async def seats(s: Svc):
+        return s.seats()
+
+    @app.post("/api/v1/portfolios/{pid}/cheer")
+    async def cheer(s: Svc, pid: str, request: Request, x_visitor: Annotated[str | None, Header()] = None):
+        ip = client_ip(request)
+        return await s.cheer(pid, (x_visitor or "")[:64] or ip, ip)
 
     @app.get("/api/v1/market/symbols")
     async def symbols(s: Svc, q: str = Query("", max_length=20),
@@ -209,11 +222,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/join", status_code=201)
     async def join(s: Svc, body: JoinIn, request: Request):
-        client = request.client.host if request.client else "unknown"
+        client = client_ip(request)
         if not s.join_allowed(client):
             raise HTTPException(429, {"code": "RATE_LIMITED", "message": "报名太频繁，请一小时后再试"})
         controller = {"human": "human", "openpup_ai": "openpup_ai", "external_bot": "external_bot"}[body.kind]
-        return await s.join(body.display_name, controller, body.persona_tag, body.brief)
+        return await s.join(body.display_name, controller, body.persona_tag, body.brief,
+                            invite_code=body.invite_code, client_ip=client)
 
     @app.get("/api/v1/events/stream")
     async def stream(s: Svc, request: Request, last_event_id: Annotated[str | None, Header()] = None,
@@ -278,6 +292,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await s.submit_debate(pid, body.model_dump())
 
     return app
+
+
+def client_ip(request: Request) -> str:
+    """The visitor's IP: uvicorn applies X-Forwarded-For from the trusted proxy chain (nginx -> web -> engine)."""
+    return request.client.host if request.client else "unknown"
 
 
 def _sse(e: dict) -> str:

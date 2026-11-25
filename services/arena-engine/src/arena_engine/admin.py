@@ -1,7 +1,17 @@
-"""Operator commands.
+"""Operator commands (run inside the engine container: docker compose exec arena-engine python -m arena_engine.admin …).
 
-    python -m arena_engine.admin issue-token macro_debate     # token for an official team driven by an external agent
-    python -m arena_engine.admin list-teams
+    invites create --kind human --count 20 [--uses 1] [--note "WeChat group A"]
+    invites list | invites revoke AG-XXXXXXXX
+    seats                                   seats taken / total per group
+    suspend <name|id> --reason "…"          cannot trade, off the leaderboard; reversible with `restore`
+    ban <name|id> --reason "…"              token revoked, open orders canceled, off the leaderboard
+    restore <name|id>
+    hide order|debate <id> --reason "…"     replace a rationale / debate with "hidden" everywhere; `unhide` undoes
+    review                                  sign-ups that share a source (possible multi-accounting)
+    issue-token <persona>                   token for an official team driven by an external agent
+    list-teams
+
+The running engine applies status and moderation changes within 30 seconds.
 """
 from __future__ import annotations
 
@@ -11,6 +21,7 @@ import hashlib
 import hmac
 import secrets
 import sys
+import uuid
 from datetime import datetime, timedelta
 
 from .config import Settings
@@ -23,9 +34,35 @@ from .store import Store
 async def _main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="python -m arena_engine.admin")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    it = sub.add_parser("issue-token", help="issue an API token for an official team")
+
+    inv = sub.add_parser("invites", help="invite codes")
+    inv_sub = inv.add_subparsers(dest="action", required=True)
+    c = inv_sub.add_parser("create")
+    c.add_argument("--kind", choices=["human", "ai"], required=True)
+    c.add_argument("--count", type=int, default=1)
+    c.add_argument("--uses", type=int, default=1, help="sign-ups per code (e.g. 30 for a group code)")
+    c.add_argument("--note", default=None)
+    inv_sub.add_parser("list")
+    r = inv_sub.add_parser("revoke")
+    r.add_argument("code")
+
+    sub.add_parser("seats")
+    for name in ("suspend", "ban"):
+        p = sub.add_parser(name)
+        p.add_argument("who", help="portfolio name or id")
+        p.add_argument("--reason", required=True)
+    p = sub.add_parser("restore")
+    p.add_argument("who")
+    for name in ("hide", "unhide"):
+        p = sub.add_parser(name)
+        p.add_argument("kind", choices=["order", "debate"])
+        p.add_argument("id")
+        if name == "hide":
+            p.add_argument("--reason", default=None)
+    sub.add_parser("review", help="sign-ups sharing a source")
+    it = sub.add_parser("issue-token", help="token for an official team")
     it.add_argument("persona", choices=sorted(BY_TAG))
-    sub.add_parser("list-teams", help="list portfolios in the current season")
+    sub.add_parser("list-teams")
     args = ap.parse_args(argv)
 
     settings = Settings()
@@ -35,11 +72,71 @@ async def _main(argv: list[str]) -> int:
         store = Store(pool)
         today = datetime.now(CST).date()
         season = await store.ensure_season(settings.resolved_season_slug(), today, today + timedelta(days=120))
+        sid = season["id"]
+
+        if args.cmd == "invites":
+            if args.action == "create":
+                if args.count < 1 or args.count > 500 or args.uses < 1:
+                    print("count must be 1-500 and uses >= 1", file=sys.stderr)
+                    return 2
+                for code in await store.create_invites(sid, args.kind, args.count, args.uses, args.note):
+                    print(code)
+                print(f"# {args.count} {args.kind} invite(s), {args.uses} use(s) each, season {season['slug']}",
+                      file=sys.stderr)
+            elif args.action == "list":
+                for row in await store.list_invites(sid):
+                    state = "revoked" if row["revoked_at"] else ("used up" if row["used"] >= row["max_uses"] else "open")
+                    print(f"{row['code']}  {row['kind']:<5} {row['used']}/{row['max_uses']}  {state:<8} {row['note'] or ''}")
+            else:
+                ok = await store.revoke_invite(args.code)
+                print("revoked" if ok else "no such open invite")
+            return 0
+
+        if args.cmd == "seats":
+            taken = await store.seats_taken(sid)
+            print(f"human {taken['human']}/{settings.seats_human} · ai {taken['ai']}/{settings.seats_ai} "
+                  f"· invites {'required' if settings.require_invite else 'off'} · season {season['slug']}")
+            return 0
+
+        if args.cmd in ("suspend", "ban", "restore"):
+            row = await store.find_portfolio(sid, args.who)
+            if row is None:
+                print(f"no portfolio {args.who!r} in season {season['slug']}", file=sys.stderr)
+                return 1
+            if row["is_official"]:
+                print("official teams cannot be suspended or banned", file=sys.stderr)
+                return 1
+            status = {"suspend": "suspended", "ban": "banned", "restore": "active"}[args.cmd]
+            if args.cmd == "restore" and row["status"] == "banned":
+                print("banned accounts stay banned (their token is revoked); create a new invite instead", file=sys.stderr)
+                return 1
+            await store.set_status(row["id"], status, getattr(args, "reason", None))
+            print(f"{row['name']}: {row['status']} -> {status} (the engine applies it within 30s)")
+            return 0
+
+        if args.cmd in ("hide", "unhide"):
+            ref = uuid.UUID(args.id)
+            if args.cmd == "hide":
+                await store.hide(args.kind, ref, args.reason)
+            else:
+                await store.unhide(args.kind, ref)
+            print(f"{args.cmd} {args.kind} {ref} (applies within 30s)")
+            return 0
+
+        if args.cmd == "review":
+            rows = await store.shared_sources(sid)
+            if not rows:
+                print("no shared sign-up sources")
+            for row in rows:
+                print(f"{row['n']} accounts from one source: {', '.join(row['names'])}")
+            return 0
+
         if args.cmd == "list-teams":
-            for p in await store.portfolios(season["id"]):
+            for p in await store.portfolios(sid):
                 print(f"{p.id}  {p.controller_type:<12} {'official' if p.is_official else '':<8} {p.persona_tag or '':<22} {p.name}")
             return 0
-        meta = await store.official_portfolio(season["id"], args.persona)
+
+        meta = await store.official_portfolio(sid, args.persona)
         if meta is None:
             print(f"no official team {args.persona!r} in season {season['slug']}", file=sys.stderr)
             return 1

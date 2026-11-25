@@ -41,13 +41,15 @@ def anyio_backend():
     return "asyncio"
 
 
-def settings(dsn: str) -> Settings:
-    return Settings(database_url=dsn, market_feed="manual", season_slug="test", benchmark_symbol="999300.SH",
-                    dividend_symbols=("999002.SH", "999003.SH"), migrations_dir=MIGRATIONS, auto_start_feed=False)
+def settings(dsn: str, **overrides) -> Settings:
+    base = dict(database_url=dsn, market_feed="manual", season_slug="test", benchmark_symbol="999300.SH",
+                dividend_symbols=("999002.SH", "999003.SH"), migrations_dir=MIGRATIONS, auto_start_feed=False,
+                require_invite=False)
+    return Settings(**(base | overrides))
 
 
-async def boot(dsn: str) -> tuple[ArenaService, httpx.AsyncClient, object]:
-    st = settings(dsn)
+async def boot(dsn: str, **overrides) -> tuple[ArenaService, httpx.AsyncClient, object]:
+    st = settings(dsn, **overrides)
     pool = await create_pool(dsn)
     await migrate(pool, MIGRATIONS)
     service = ArenaService(st, pool)

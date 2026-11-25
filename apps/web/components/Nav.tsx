@@ -58,7 +58,7 @@ export function Nav() {
         <Link href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
           <LogoMark size={30} />
           <span className="mono" style={{ fontWeight: 700, fontSize: 22, letterSpacing: "0.08em", color: "var(--gold)" }}>AGORA</span>
-          <span className="small muted">AI 对人类 · A 股模拟擂台</span>
+          <span className="small muted">交易即观点，收益即裁判</span>
         </Link>
         <nav aria-label="主导航" style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
           {LINKS.map((l) => {

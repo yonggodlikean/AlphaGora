@@ -135,12 +135,24 @@ class Store:
             out.setdefault(str(r["portfolio_id"]), {})[r["symbol"]] = (r["qty"], r["frozen_qty"], r["cost_basis"])
         return out
 
-    async def cancel_stale_open_orders(self) -> int:
-        """Open orders cannot survive a restart (their reservations lived in memory): cancel them."""
-        res = await self.pool.execute(
-            "UPDATE orders SET status = 'canceled', reject_reason = 'engine_restart' "
-            "WHERE status IN ('new', 'partially_filled')")
-        return int(res.split()[-1])
+    async def load_open_orders(self, portfolio_ids: list[str]) -> list[asyncpg.Record]:
+        """Open orders left by a previous run, with what they had filled (to rebuild fees and reservations)."""
+        return await self.pool.fetch(
+            """SELECT o.*, COALESCE(sum(t.notional), 0) AS filled_notional, COALESCE(sum(t.commission), 0) AS commission
+               FROM orders o LEFT JOIN trades t ON t.order_id = o.id
+               WHERE o.status IN ('new', 'partially_filled') AND o.portfolio_id = ANY($1::uuid[])
+               GROUP BY o.id ORDER BY o.created_at""", [uuid.UUID(p) for p in portfolio_ids])
+
+    async def expire_orders(self, order_ids: list[str], reason: str) -> None:
+        if not order_ids:
+            return
+        ids = [uuid.UUID(i) for i in order_ids]
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "UPDATE orders SET status = 'expired', reject_reason = $2 WHERE id = ANY($1::uuid[])", ids, reason)
+            await conn.executemany(
+                "INSERT INTO order_events (order_id, event_type, payload) VALUES ($1, 'order.expired', $2::jsonb)",
+                [(i, _json({"reason": reason})) for i in ids])
 
     async def has_market_open(self, season_id: uuid.UUID, trade_date: date) -> bool:
         return bool(await self.pool.fetchval(

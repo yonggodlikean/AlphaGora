@@ -132,6 +132,37 @@ class AShareMatchingEngine:
         self._check_invariants(acct)
         return acct
 
+    def restore_order(self, order: Order) -> None:
+        """Re-open a persisted open limit order after a restart within the same trade date.
+
+        Cash (buys) or shares (sells) are reserved again exactly as on submit. Raises OrderRejected if the
+        account can no longer cover it; nothing is changed in that case and the caller expires the order.
+        """
+        if not order.status.is_open or order.remaining <= 0 or order.order_type is not OrderType.LIMIT:
+            raise ValueError(f"order {order.id} is not an open limit order")
+        if order.trade_date != self._trade_date or not self._day_open:
+            raise ValueError("orders can only be restored into their own open trade date")
+        acct = self.account(order.portfolio_id)
+        if order.side is Side.BUY:
+            order.reserve_price = order.price  # type: ignore[assignment]
+            order.reserved_cash = ZERO
+            needed = self._buy_reservation_amount(order.reserve_price, order.remaining,
+                                                  order.filled_notional, order.commission_charged)
+            if needed > acct.available_cash:
+                raise OrderRejected(RejectCode.INSUFFICIENT_CASH, f"needs {needed}, available {acct.available_cash}")
+            self._update_buy_reservation(order, acct)
+        else:
+            pos = acct.positions.get(order.symbol)
+            if pos is None or pos.sellable_qty < order.remaining:
+                raise OrderRejected(RejectCode.INSUFFICIENT_POSITION, f"cannot re-reserve {order.remaining} shares")
+            pos.reserved_qty += order.remaining
+            order.reserved_qty = order.remaining
+        self._check_invariants(acct)
+        order.seq = next(self._seq)
+        self._orders[order.id] = order
+        self._idempotency[(order.portfolio_id, order.idempotency_key)] = order.id
+        self._open.setdefault(order.symbol, {})[order.id] = order
+
     def resume_trading_day(self, trade_date: date, now: datetime) -> list[ArenaEvent]:
         """Re-open a trading day after a restart WITHOUT T+1 settlement (today's buys stay frozen)."""
         if not self.calendar.is_trading_day(trade_date):

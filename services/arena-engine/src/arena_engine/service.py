@@ -26,7 +26,7 @@ from .domain import events as ev
 from .domain.enums import ControllerType, Liquidity, OrderStatus, OrderType, RejectCode, Side
 from .domain.errors import ArenaError, MarketDataError, OrderRejected
 from .domain.events import ArenaEvent
-from .domain.models import Fill, OrderRequest, Position
+from .domain.models import Fill, Order, OrderRequest, Position
 from .house_bots import HouseBots, Intent, MarketView
 from .market.calendar import CST, TradingCalendar
 from .market.demo import DemoFeed, EndOfDay
@@ -79,6 +79,7 @@ class ArenaService:
         self._last_bot_minute: tuple | None = None
         self._token_cache: dict[bytes, str] = {}
         self._summaries: dict[str, str] = {}
+        self._pending_restore: list = []
         self.last_seen: dict[str, tuple[datetime, str | None]] = {}
         self._last_seen_written: dict[str, datetime] = {}   # house order id -> decision summary (for conflict cards)
         self._join_hits: dict[str, deque] = {}
@@ -94,9 +95,11 @@ class ArenaService:
                                                      today + timedelta(days=120))
         self.season_id = self.season["id"]
         await self._load_portfolios()
-        stale = await self.store.cancel_stale_open_orders()
-        if stale:
-            log.warning("canceled %d open orders left from a previous run", stale)
+        # Open orders from a previous run are restored into their own trade date once it reopens (first snapshot),
+        # or expired if the market has moved on to a new day.
+        self._pending_restore = list(await self.store.load_open_orders(list(self.meta)))
+        if self._pending_restore:
+            log.info("%d open orders waiting to be restored", len(self._pending_restore))
         self.names = await self.store.symbol_names()
         external = self.settings.resolved_external_teams()
         teams = {p.id: p.persona_tag for p in self.meta.values()
@@ -263,10 +266,12 @@ class ArenaService:
             self.minute_closes[sym][-1] = snap.last_price
 
     async def _open_day_locked(self, d: date, now: datetime) -> None:
-        if await self.store.has_market_open(self.season_id, d):
+        resumed = await self.store.has_market_open(self.season_id, d)
+        if resumed:
             events = self.engine.resume_trading_day(d, now)
         else:
             events = self.engine.begin_trading_day(d, now)
+        await self._restore_open_orders(d if resumed else None)
         self.day_open_px.clear()
         self.minute_closes.clear()
         self._minute_of.clear()
@@ -274,6 +279,33 @@ class ArenaService:
         positions = [(pid, p) for pid, a in self.engine.accounts.items() for p in a.positions.values()]
         await self._handle([], events, extra_positions=positions)
         log.info("market open %s", d)
+
+    async def _restore_open_orders(self, trade_date: date | None) -> None:
+        """Put back the open orders of `trade_date` (restart within a session); expire anything older."""
+        pending, self._pending_restore = self._pending_restore, []
+        restored, expired = 0, []
+        for r in pending:
+            if trade_date is None or r["trade_date"] != trade_date or r["order_type"] != "limit":
+                expired.append(str(r["id"]))
+                continue
+            order = Order(
+                id=str(r["id"]), seq=0, portfolio_id=str(r["portfolio_id"]), symbol=r["symbol"], side=Side(r["side"]),
+                order_type=OrderType.LIMIT, qty=r["qty"], price=r["price"], thesis=r["thesis"],
+                debate_id=None if r["debate_id"] is None else str(r["debate_id"]),
+                idempotency_key=r["idempotency_key"], request_hash=r["request_hash"], trade_date=r["trade_date"],
+                created_at=r["created_at"], status=OrderStatus(r["status"]), filled_qty=r["filled_qty"],
+                filled_notional=r["filled_notional"], commission_charged=r["commission"], fees_paid=r["fees_paid"],
+                queue_initial=r["queue_initial"], queue_ahead=r["queue_ahead"],
+            )
+            try:
+                self.engine.restore_order(order)
+                restored += 1
+            except (OrderRejected, ValueError) as exc:
+                log.warning("could not restore order %s: %s", order.id, exc)
+                expired.append(order.id)
+        await self.store.expire_orders(expired, "engine_restart")
+        if restored or expired:
+            log.info("restart: restored %d open orders, expired %d", restored, len(expired))
 
     async def close_day(self) -> None:
         async with self.lock:

@@ -247,3 +247,64 @@ async def test_pre_shared_team_token_hands_team_to_external_driver(dsn):
     await client2.aclose()
     await service2.stop()
     await pool2.close()
+
+
+@pytest.mark.anyio
+async def test_open_orders_survive_a_restart_within_the_session(dsn):
+    market = DemoMarket(seed=11)
+    day1 = market.day(DAY1)
+    service, client, pool = await boot(dsn)
+    r = await client.post("/api/v1/join", json={"display_name": "排队王", "kind": "human"})
+    pid, auth = r.json()["portfolio_id"], {"Authorization": f"Bearer {r.json()['token']}"}
+    await play(service, day1, 0, 120)
+
+    snap = (await client.get("/api/v1/market/snapshot", params={"symbols": "999002.SH"})).json()["snapshots"][0]
+    low = str((Decimal(snap["bids"][0][0]) - Decimal("0.05")).quantize(Decimal("0.01")))
+    resting = await client.post("/api/v1/agent/orders", headers=auth, json={
+        "idempotency_key": "rest-000001", "symbol": "999002.SH", "side": "buy", "price": low, "qty": 2000,
+        "thesis": "低吸挂单，等它回落"})
+    assert resting.status_code == 201 and resting.json()["status"] == "new", resting.text
+    oid = resting.json()["order_id"]
+    reserved = service.engine.account(pid).reserved_cash
+    queue = service.engine.order(oid).queue_ahead
+    assert reserved > 0
+    await client.aclose()
+    await service.stop()
+    await pool.close()
+
+    # --- restart in the middle of the same session
+    service, client, pool = await boot(dsn)
+    assert service.engine.account(pid).reserved_cash == 0          # not restored until the day reopens
+    await play(service, day1, 120, 125)
+    restored = service.engine.order(oid)
+    assert restored is not None and restored.status.is_open and restored.queue_ahead == queue
+    assert service.engine.account(pid).reserved_cash == reserved
+    mine = (await client.get("/api/v1/agent/orders", headers=auth)).json()["orders"]
+    assert mine[0]["order_id"] == oid and mine[0]["status"] == "new"
+    dup = await client.post("/api/v1/agent/orders", headers=auth, json={
+        "idempotency_key": "rest-000001", "symbol": "999002.SH", "side": "buy", "price": low, "qty": 2000,
+        "thesis": "低吸挂单，等它回落"})
+    assert dup.json()["duplicate"] is True and dup.json()["status"] == "new"
+    cancel = await client.delete(f"/api/v1/agent/orders/{oid}", headers=auth)
+    assert cancel.status_code == 200 and cancel.json()["status"] == "canceled"
+    assert service.engine.account(pid).reserved_cash == 0
+
+    # --- another resting order, then the arena comes back on the NEXT trading day: it expires
+    again = await client.post("/api/v1/agent/orders", headers=auth, json={
+        "idempotency_key": "rest-000002", "symbol": "999002.SH", "side": "buy", "price": low, "qty": 1000,
+        "thesis": "再挂一单试试"})
+    oid2 = again.json()["order_id"]
+    await client.aclose()
+    await service.stop()
+    await pool.close()
+
+    service, client, pool = await boot(dsn)
+    await play(service, market.day(DAY2), 0, 5)
+    assert service.engine.order(oid2) is None
+    assert service.engine.account(pid).reserved_cash == 0
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status, reject_reason FROM orders WHERE id = $1", uuid.UUID(oid2))
+    assert (row["status"], row["reject_reason"]) == ("expired", "engine_restart")
+    await client.aclose()
+    await service.stop()
+    await pool.close()

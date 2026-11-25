@@ -79,9 +79,12 @@ and IPO no-limit days.
   timestamps, so the whole day (and T+1) plays out at any speed.
 * **Day lifecycle.** The first snapshot of a new date opens the day (T+1 settlement); the close expires open orders,
   writes `daily_snapshots`, awards end-of-day badges and posts the templated roast (`roast.daily`).
-* **Restart.** Cash comes from the ledger, positions (including today's T+1 lock) from `positions`. Open orders do
-  not survive a restart (their reservations were in memory): they are marked `canceled` / `engine_restart`.
-  Idempotency is checked against the database first, so a client retry after a restart is still deduplicated.
+* **Restart.** Cash comes from the ledger, positions (including today's T+1 lock) from `positions`. Open orders
+  are loaded at startup and, when their trade date reopens (first snapshot), restored into the engine with their
+  reservations and last persisted queue position (queue changes are written as they happen). If the market has
+  already moved to a new day they are expired (`engine_restart`), as A-share day orders would have been. An order
+  the account can no longer cover is expired instead of restored. Idempotency is checked against the database
+  first, so a client retry after a restart is still deduplicated.
 * **House teams.** `house_bots.py` runs once per market minute. Each action becomes a debate (`model_id: rules-v1`)
   plus an order linked to it. The benchmark team buys the CSI 300 ETF (510300.SH live, 999300.SH demo) and holds.
 * **OpenPup-driven team.** With `PUP_TEAM_TOKEN` set, the engine registers that token for OpenPup 宏观辩论团 and

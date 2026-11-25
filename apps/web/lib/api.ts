@@ -75,7 +75,7 @@ export async function api<T>(path: string, init: RequestInit & { auth?: boolean 
 }
 
 // ---------------------------------------------------------------- response types
-export type Phase = "holiday" | "pre_open" | "auction" | "trading" | "waiting" | "lunch" | "closed";
+export type Phase = "holiday" | "pre_open" | "auction" | "open_wait" | "trading" | "waiting" | "lunch" | "closing_auction" | "closed";
 export type Market = { trading: boolean; phase?: Phase; day_open: boolean; trade_date: string | null; clock: string; now?: string; simulated: boolean; feed: string; online?: number; visitors_today?: number };
 export type Driver = { kind: "rules" | "external"; name: string | null; online: boolean; last_seen: string | null } | null;
 export type Group = "official_ai" | "community_ai" | "benchmark" | "human" | "hybrid" | "bot";
@@ -100,12 +100,22 @@ export type Feed = {
 };
 export type SymbolRow = {
   symbol: string; name: string; last: string; prev_close: string; chg_pct: number; upper_limit: string;
-  lower_limit: string; limit_up_sealed: boolean; limit_down_sealed: boolean; suspended: boolean;
+  lower_limit: string; limit_up_sealed: boolean; limit_down_sealed: boolean; suspended: boolean; call_auction?: boolean;
 };
+export type AuctionInfo = { price: string; volume: number; unmatched_buy: number; unmatched_sell: number };
 export type Snapshot = {
   symbol: string; name: string; bids: [string, number][]; asks: [string, number][]; last_price: string;
   upper_limit: string; lower_limit: string; prev_close: string; limit_up_sealed: boolean;
+  call_auction?: boolean; auction?: AuctionInfo | null;
 };
+
+/** Exchanges take no cancels 09:20-09:30 and 14:57-15:00. */
+export function cancelBlocked(m?: Market | null): string | null {
+  if (!m) return null;
+  if (m.phase === "closing_auction") return "收盘集合竞价（14:57–15:00）不能撤单";
+  if (m.phase === "open_wait" || (m.phase === "auction" && m.clock >= "09:20:00")) return "09:20–09:30 不能撤单";
+  return null;
+}
 export type Position = { symbol: string; name: string; qty: number; sellable_qty: number; frozen_qty: number; reserved_qty: number; cost_basis: string; market_value: string };
 export type AgentState = {
   portfolio_id: string; portfolio_name: string; cash: string; available_cash: string; total_equity: string;

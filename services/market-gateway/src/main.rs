@@ -110,7 +110,7 @@ fn cst_now() -> DateTime<FixedOffset> {
 }
 
 fn in_poll_window(t: NaiveTime) -> bool {
-    t >= NaiveTime::from_hms_opt(9, 24, 0).unwrap() && t <= NaiveTime::from_hms_opt(15, 2, 0).unwrap()
+    t >= NaiveTime::from_hms_opt(9, 14, 0).unwrap() && t <= NaiveTime::from_hms_opt(15, 2, 0).unwrap()
 }
 
 fn session_now(cfg: &Config) -> bool {

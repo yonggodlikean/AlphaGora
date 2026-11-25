@@ -40,6 +40,8 @@ def snapshot_from_dict(d: dict) -> L1Snapshot:
         lower_limit=Decimal(str(d["lower_limit"])),
         prev_close=Decimal(str(d["prev_close"])),
         suspended=bool(d.get("suspended", False)),
+        call_auction=bool(d.get("call_auction", False)),
+        auction=d.get("auction"),
         extra={"name": d["name"]} if d.get("name") else {},
     )
 
@@ -51,6 +53,10 @@ def snapshot_to_dict(s: L1Snapshot) -> dict:
          "last_price": str(s.last_price), "cumulative_volume": s.cumulative_volume,
          "upper_limit": str(s.upper_limit), "lower_limit": str(s.lower_limit), "prev_close": str(s.prev_close),
          "suspended": s.suspended}
+    if s.call_auction:
+        d["call_auction"] = True
+        if s.auction:
+            d["auction"] = s.auction
     if s.extra.get("name"):
         d["name"] = s.extra["name"]
     return d

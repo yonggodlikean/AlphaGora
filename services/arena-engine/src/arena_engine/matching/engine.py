@@ -35,7 +35,7 @@ from ..domain.enums import ControllerType, Liquidity, OrderStatus, OrderType, Re
 from ..domain.errors import InvariantViolation, MarketDataError, OrderRejected
 from ..domain.events import ArenaEvent
 from ..domain.models import ZERO, Account, Fill, Order, OrderRequest
-from ..market.calendar import TradingCalendar
+from ..market.calendar import CLOSE_AUCTION, CST, TradingCalendar
 from ..market.snapshot import L1Snapshot
 from .fees import FeeSchedule, money
 from .rate_limit import SlidingWindowLimiter
@@ -50,6 +50,7 @@ class EngineConfig:
     cancel_window: timedelta = timedelta(minutes=1)
     thesis_min_len: int = 4
     thesis_max_len: int = 280
+    auction_share: float = 0.10      # one portfolio may take at most this share of a call auction's volume
 
 
 @dataclass(slots=True)
@@ -282,6 +283,13 @@ class AShareMatchingEngine:
         self._open.setdefault(order.symbol, {})[order.id] = order
         result = SubmitResult(order, [], [ArenaEvent(ev.ORDER_ACCEPTED, now, order.public_view())])
 
+        window = self.calendar.order_window(now)
+        if window in ("call_open", "call_close"):
+            return result                         # waits for the call-auction match (09:25 / 15:00)
+        if window == "wait":
+            order.deferred = True                 # treated as a new arrival at 09:30
+            return result
+
         # 3. Take visible liquidity.
         self._match_on_arrival(order, snap, now, result)
 
@@ -301,6 +309,9 @@ class AShareMatchingEngine:
             raise OrderRejected(RejectCode.UNKNOWN_ORDER, order_id)
         if not order.status.is_open:
             raise OrderRejected(RejectCode.ORDER_NOT_OPEN, f"order is {order.status.value}")
+        if not self.calendar.can_cancel(now):
+            raise OrderRejected(RejectCode.CANCEL_NOT_ALLOWED,
+                                "exchanges accept no cancels 09:20-09:30 and 14:57-15:00 (call auction)")
         key = (portfolio_id, order.symbol)
         if not self._cancel_limiter.allowed(key, now):
             raise OrderRejected(
@@ -328,17 +339,80 @@ class AShareMatchingEngine:
         prev = self._books.get(snap.symbol)
         if prev is not None and snap.seq <= prev.seq:
             return result
+        if snap.call_auction:
+            self._books[snap.symbol] = snap      # reference prices for order checks; nothing trades
+            return result
         delta = 0
         if prev is not None:
             # A shrinking cumulative volume is a feed glitch; treat as no trades rather than reversing queues.
             delta = max(0, snap.cumulative_volume - prev.cumulative_volume)
         self._books[snap.symbol] = snap
+        if prev is not None and prev.call_auction:
+            # The first priced book after a call auction: everything the auction traded is in `delta`.
+            self._call_auction_match(snap, prev, delta, result)
+            return result
         result.events += self._board_transitions(prev, snap)
 
+        continuous = self.calendar.is_continuous_trading(snap.ts)
         for order in list(self._open.get(snap.symbol, {}).values()):
-            if order.order_type is OrderType.LIMIT:
+            if order.deferred:
+                if continuous:
+                    self._deferred_arrival(order, snap, result)
+            elif order.order_type is OrderType.LIMIT:
                 self._match_resting(order, snap, delta, result)
         return result
+
+    def _deferred_arrival(self, order: Order, snap: L1Snapshot, out: TickResult) -> None:
+        """An order entered 09:25-09:30 meets the book at 09:30 exactly like a fresh arrival."""
+        order.deferred = False
+        sub = SubmitResult(order, [], [])
+        self._match_on_arrival(order, snap, snap.ts, sub)
+        out.fills += sub.fills
+        out.events += sub.events
+        if order.status.is_open:
+            if order.order_type is OrderType.MARKET:
+                out.events.append(self._terminate(order, OrderStatus.CANCELED, snap.ts, reason="ioc_remainder"))
+            else:
+                self._init_queue(order, snap)
+                if self._at_limit_price(order, snap):
+                    out.events.append(self._queue_event(order, snap, snap.ts))
+
+    def _call_auction_match(self, snap: L1Snapshot, prev: L1Snapshot, volume: int, out: TickResult) -> None:
+        """Single-price match at the auction price P = the first priced `last_price`, for every open limit order.
+
+        Better than P (buy above / sell below): filled at P. Exactly at P: filled only on the side the exchange
+        had short at P; the long side is left over (seen as residual bid1/ask1 at P, or the last indicative
+        `unmatched_*`), so our order queues behind it. One portfolio takes at most `auction_share` of the volume
+        the real auction traded, per symbol. Unfilled opening orders rest into continuous trading; unfilled
+        closing orders expire at the close like any other."""
+        P = snap.last_price
+        closing = snap.ts.astimezone(CST).time() >= CLOSE_AUCTION[0]
+        buy_excess = snap.bid1 is not None and snap.bid1.price == P
+        sell_excess = snap.ask1 is not None and snap.ask1.price == P
+        if not (buy_excess or sell_excess) and prev.auction:
+            buy_excess = (prev.auction.get("unmatched_buy") or 0) > 0
+            sell_excess = (prev.auction.get("unmatched_sell") or 0) > 0
+        cap = int(volume * self.config.auction_share)
+        used: dict[str, int] = {}
+        orders = [o for o in self._open.get(snap.symbol, {}).values() if o.order_type is OrderType.LIMIT]
+        # price priority, then time priority
+        orders.sort(key=lambda o: (-(o.price or ZERO) if o.side is Side.BUY else (o.price or ZERO), o.seq))
+        for order in orders:
+            order.deferred = False
+            is_buy = order.side is Side.BUY
+            better = (order.price > P) if is_buy else (order.price < P)
+            at_p = order.price == P
+            if volume > 0 and (better or (at_p and not (buy_excess if is_buy else sell_excess))):
+                qty = min(order.remaining, cap - used.get(order.portfolio_id, 0))
+                if qty > 0:
+                    used[order.portfolio_id] = used.get(order.portfolio_id, 0) + qty
+                    fill, event = self._apply_fill(order, P, qty, Liquidity.AUCTION, snap, snap.ts)
+                    out.fills.append(fill)
+                    out.events.append(event)
+            if order.status.is_open and not closing:
+                self._init_queue(order, snap)     # residual book: at P on the long side we queue behind it
+                if self._at_limit_price(order, snap):
+                    out.events.append(self._queue_event(order, snap, snap.ts))
 
     # ================================================================== validation
     def _validate(self, req: OrderRequest, acct: Account, now: datetime) -> L1Snapshot:
@@ -358,14 +432,18 @@ class AShareMatchingEngine:
         elif req.price is not None:
             raise OrderRejected(RejectCode.INVALID_PRICE, "market orders must not carry a price")
 
-        if not (self._day_open and self.calendar.trade_date_of(now) == self._trade_date
-                and self.calendar.is_continuous_trading(now)):
-            raise OrderRejected(RejectCode.MARKET_CLOSED, "orders accepted 09:30-11:30 and 13:00-15:00 CST")
+        window = self.calendar.order_window(now)
+        if not (self._day_open and self.calendar.trade_date_of(now) == self._trade_date and window):
+            raise OrderRejected(RejectCode.MARKET_CLOSED,
+                                "orders accepted 09:15-11:30 and 13:00-15:00 CST (call auctions 09:15-09:25, 14:57-15:00)")
+        if window in ("call_open", "call_close") and req.order_type is not OrderType.LIMIT:
+            raise OrderRejected(RejectCode.INVALID_PRICE, "call auctions accept limit orders only")
 
         snap = self._books.get(req.symbol)
         if snap is None:
             raise OrderRejected(RejectCode.NO_MARKET_DATA, req.symbol)
-        if now - snap.ts > cfg.max_snapshot_age:
+        # Outside continuous trading the book only supplies reference prices and may legitimately sit still.
+        if window == "continuous" and now - snap.ts > cfg.max_snapshot_age:
             raise OrderRejected(RejectCode.STALE_MARKET_DATA, f"last snapshot {snap.ts.isoformat()}")
         if snap.suspended:
             raise OrderRejected(RejectCode.SUSPENDED, req.symbol)

@@ -13,7 +13,8 @@ const LINKS = [
 ];
 
 const PHASE: Record<Phase, [string, string]> = {
-  trading: ["交易中", "pill-up"], auction: ["集合竞价", "pill-gold"], waiting: ["等待行情", "pill-gold"],
+  trading: ["交易中", "pill-up"], auction: ["集合竞价", "pill-gold"], open_wait: ["等待开盘", "pill-gold"],
+  closing_auction: ["收盘竞价", "pill-gold"], waiting: ["等待行情", "pill-gold"],
   lunch: ["午间休市", "pill-gray"], pre_open: ["未开盘", "pill-gray"], closed: ["已收盘", "pill-gray"], holiday: ["休市", "pill-gray"],
 };
 const DOT: Record<string, string> = { "pill-up": "#f0524b", "pill-gold": "#f5c451", "pill-gray": "#6f7684" };
@@ -50,7 +51,8 @@ function useMarket() {
 export function Nav() {
   const path = usePathname();
   const { market, clock } = useMarket();
-  const [label, pill] = market ? PHASE[market.phase ?? (market.trading ? "trading" : "closed")] ?? PHASE.closed : PHASE.closed;
+  const [base, pill] = market ? PHASE[market.phase ?? (market.trading ? "trading" : "closed")] ?? PHASE.closed : PHASE.closed;
+  const label = market?.phase === "auction" ? `${base} · ${clock >= "09:20:00" ? "不可撤单" : "可撤单"}` : base;
 
   return (
     <header style={{ borderBottom: "1px solid var(--line)", background: "var(--bar)" }}>

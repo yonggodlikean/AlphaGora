@@ -311,9 +311,11 @@ class ArenaService:
         if name and self.names.get(sym) != name:
             self.names[sym] = name
             self._names_pending[sym] = name
+        if snap.call_auction:
+            return                        # indicative prices, not trades
         t = snap.ts.astimezone(CST).time()
-        if sym not in self.day_open_px and t >= time(9, 30):
-            self.day_open_px[sym] = snap.last_price
+        if sym not in self.day_open_px and t >= time(9, 25):
+            self.day_open_px[sym] = snap.last_price           # the opening auction price
         minute = (t.hour, t.minute)
         if self._minute_of.get(sym) != minute:
             self._minute_of[sym] = minute
@@ -1040,7 +1042,7 @@ class ArenaService:
                 "prev_close": str(b.prev_close), "chg_pct": float(b.last_price / b.prev_close - 1) * 100,
                 "upper_limit": str(b.upper_limit), "lower_limit": str(b.lower_limit),
                 "limit_up_sealed": b.limit_up_sealed, "limit_down_sealed": b.limit_down_sealed,
-                "suspended": b.suspended}
+                "suspended": b.suspended, "call_auction": b.call_auction}
 
     def symbols(self, q: str = "", sort: str = "hot", limit: int = 30, offset: int = 0,
                 only: list[str] | None = None) -> dict:
@@ -1090,7 +1092,8 @@ class ArenaService:
                         "last_price": str(b.last_price), "cumulative_volume": b.cumulative_volume,
                         "upper_limit": str(b.upper_limit), "lower_limit": str(b.lower_limit),
                         "prev_close": str(b.prev_close), "limit_up_sealed": b.limit_up_sealed,
-                        "limit_down_sealed": b.limit_down_sealed, "suspended": b.suspended})
+                        "limit_down_sealed": b.limit_down_sealed, "suspended": b.suspended,
+                        "call_auction": b.call_auction, "auction": b.auction})
         return out
 
     def queues(self) -> list[dict]:

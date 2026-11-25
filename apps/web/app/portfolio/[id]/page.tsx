@@ -24,7 +24,8 @@ function outcome(orders: TimelineOrder[]): { kind: string; cls: string; text: st
   const side = o.side === "buy" ? "买入" : "卖出";
   const fees = Number(o.fees_paid) > 0 ? `费用 ¥${yuan(o.fees_paid)}` : "";
   if (o.filled_qty > 0) {
-    const kind = o.liquidity.includes("board_break") ? ["炸板成交", "pill-down"] : o.liquidity.includes("queue") ? ["排队成交", "pill-up"] : ["主动成交", "pill-info"];
+    const kind = o.liquidity.includes("board_break") ? ["炸板成交", "pill-down"] : o.liquidity.includes("queue") ? ["排队成交", "pill-up"]
+      : o.liquidity.includes("auction") ? ["竞价成交", "pill-gold"] : ["主动成交", "pill-info"];
     return { kind: kind[0], cls: kind[1], text: `${side} ${int(o.filled_qty)} 股 @ ${o.avg_fill_price}`, fees };
   }
   if (o.status === "new" || o.status === "partially_filled") {

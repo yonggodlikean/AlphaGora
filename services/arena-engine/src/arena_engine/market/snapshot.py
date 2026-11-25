@@ -34,6 +34,10 @@ class L1Snapshot:
     lower_limit: Decimal
     prev_close: Decimal
     suspended: bool = False
+    # Call-auction phase (09:15-09:25, 14:57-15:00): no trading, the book is empty and `auction` holds the
+    # exchange's indicative match: {"price", "volume" (shares), "unmatched_buy", "unmatched_sell"} or None.
+    call_auction: bool = False
+    auction: dict | None = field(default=None, compare=False)
     extra: dict = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:

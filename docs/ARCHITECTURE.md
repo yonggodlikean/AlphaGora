@@ -56,8 +56,10 @@ If Nautilus later supports multi-account venues with a custom fill model, the `A
 * limit prices come from `rustdx_complete::limit` (board by code prefix; ST from the daily security-list name).
   The crate encodes that main-board ST moved from ±5% to ±10% on 2026-07-06. Any book level outside the
   computed band is logged as `limit_mismatch` and dropped, so a wrong rule (e.g. IPO no-limit days) is visible;
-* only 09:25–15:00:59 is published. Pre-open, call auction and crossed closing-auction books are dropped, and so
-  is yesterday's book served before the open (its timestamp is ahead of the clock);
+* 09:15–15:00:59 is published. The call auctions (09:15–09:25, 14:57–15:00, plus the seconds until the price is
+  set) go out as `call_auction` snapshots: empty book, reference prices, and TDX's indicative match (price,
+  volume, unmatched buy/sell) in `auction`. Yesterday's book served before the open is dropped (its timestamp is
+  ahead of the clock);
 * output: Redis Stream `md:l1` (consumed by `RedisStreamFeed`, resumable by stream ID) plus `data/tape/DATE.jsonl`
   (`ReplayFeed` / Nautilus bridge).
 
@@ -66,6 +68,12 @@ and IPO no-limit days.
 
 ## Execution model
 
+* **Call auctions**: orders entered 09:15–09:25 / 14:57–15:00 (limit only; no cancels from 09:20 and in the
+  closing auction) rest untouched. The first priced snapshot after an auction snapshot carries the auction's
+  volume as `delta` and the price as `last_price`: orders better than P fill at P; orders at P fill only on the
+  side the exchange was short at P (the long side shows as residual bid1/ask1 at P, else the last indicative
+  `unmatched_*`), otherwise they queue behind it. One portfolio takes at most 10% of the auction volume per
+  symbol. Orders entered 09:25–09:30 are treated as fresh arrivals at the first continuous snapshot.
 * **Arrival**: a marketable order walks the visible levels (market = 最优五档即时成交剩余撤销, best-5 IOC).
 * **Resting at P**: only fills when volume traded in the interval (`delta = cum_volume - prev_cum_volume`):
   * crossed (`ask1 <= P`) or traded through (`last < P`): fill at P, capped by delta. At the upper limit this is

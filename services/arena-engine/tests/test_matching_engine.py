@@ -168,7 +168,7 @@ def test_idempotent_resubmit_and_conflict(engine, tape):
     assert exc.value.code is RejectCode.IDEMPOTENCY_CONFLICT
 
 
-@pytest.mark.parametrize("hms", ["09:29:59", "11:30:00", "12:15:00", "15:00:00"])
+@pytest.mark.parametrize("hms", ["09:14:59", "11:30:00", "12:15:00", "15:00:00"])
 def test_rejects_outside_continuous_sessions(engine, tape, hms):
     engine.on_snapshot(tape.snap(at("09:30:00"), BOOK_BIDS, BOOK_ASKS, "10.00", 10_000))
     with pytest.raises(OrderRejected) as exc:

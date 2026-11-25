@@ -7,10 +7,18 @@ use rustdx_complete::limit::{self, Board};
 use rustdx_complete::tcp::stock::QuoteData;
 use serde::Serialize;
 
-/// First and last exchange times we publish. 09:25-09:30 carries the post-auction book (needed so orders have
-/// fresh data at 09:30:00); earlier frames are pre-open/call-auction virtual books and are skipped.
-pub const SESSION_START: (u32, u32) = (9, 25);
+/// First and last exchange times we publish. 09:15-09:25 and 14:57-15:00 are call auctions: published as
+/// `call_auction` snapshots (empty book, the exchange's indicative match in `auction`), so the arena can take
+/// auction orders against today's reference prices and match them at the price the exchange sets.
+pub const SESSION_START: (u32, u32) = (9, 15);
 pub const SESSION_END: (u32, u32, u32) = (15, 0, 59);
+
+fn in_call_auction(t: NaiveTime, indicative: bool) -> bool {
+    let hm = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+    (t >= hm(9, 15) && t < hm(9, 25)) || (t >= hm(14, 57) && t < hm(15, 0))
+        // the indicative-match encoding can linger a few seconds past 09:25 / 15:00 until the price is set
+        || (indicative && ((t >= hm(9, 25) && t < hm(9, 26)) || (t >= hm(15, 0) && t < hm(15, 1))))
+}
 
 /// The fields we need from a TDX quote, decoupled from rustdx so the logic is testable.
 #[derive(Debug, Clone, Default)]
@@ -23,6 +31,8 @@ pub struct RawQuote {
     pub servertime: String, // "HH:MM:SS.mmm", no date
     pub bids: [(f64, f64); 5], // (price, lots)
     pub asks: [(f64, f64); 5],
+    /// Call-auction indicative match: (price, matched lots, unmatched buy lots, unmatched sell lots).
+    pub auction: Option<(f64, f64, f64, f64)>,
 }
 
 impl From<&QuoteData> for RawQuote {
@@ -40,6 +50,7 @@ impl From<&QuoteData> for RawQuote {
             asks: [
                 (q.ask1, q.ask1_vol), (q.ask2, q.ask2_vol), (q.ask3, q.ask3_vol), (q.ask4, q.ask4_vol), (q.ask5, q.ask5_vol),
             ],
+            auction: q.auction().map(|a| (a.price, a.volume, a.unmatched_buy, a.unmatched_sell)),
         }
     }
 }
@@ -118,6 +129,18 @@ pub struct Snapshot {
     pub lower_limit: String,
     pub prev_close: String,
     pub suspended: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub call_auction: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auction: Option<AuctionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AuctionInfo {
+    pub price: String,
+    pub volume: u64,          // shares
+    pub unmatched_buy: u64,   // shares
+    pub unmatched_sell: u64,  // shares
 }
 
 /// Why a quote was not published. Counted and logged by the caller, never fatal.
@@ -177,6 +200,26 @@ pub fn normalize(q: &RawQuote, meta: &SymbolMeta, trade_date: NaiveDate) -> Resu
         }
     };
 
+    let ts = format!("{}T{}+08:00", trade_date.format("%Y-%m-%d"), t.format("%H:%M:%S%.3f"));
+    let ms = t.num_seconds_from_midnight() as u64 * 1000 + (t.nanosecond() / 1_000_000) as u64;
+    let vol_shares = (q.vol_lots.max(0.0).round() as u64) * 100;
+    if in_call_auction(t, q.auction.is_some()) {
+        let info = q.auction.filter(|a| a.0 > 0.0).map(|(p, v, ub, us)| AuctionInfo {
+            price: px(units(p, scale)),
+            volume: (v.max(0.0).round() as u64) * 100,
+            unmatched_buy: (ub.max(0.0).round() as u64) * 100,
+            unmatched_sell: (us.max(0.0).round() as u64) * 100,
+        });
+        // Opening: no trade yet, show the indicative price. Closing: the last continuous price until the close.
+        let last_u = if q.price > 0.0 { units(q.price, scale) }
+            else { q.auction.filter(|a| a.0 > 0.0).map(|a| units(a.0, scale)).unwrap_or(prev_u) };
+        return Ok(Snapshot {
+            symbol: meta.symbol.clone(), name: meta.name.clone(), ts, seq: ms, bids: vec![], asks: vec![],
+            last_price: px(last_u.clamp(down_u, up_u)), cumulative_volume: vol_shares, upper_limit: px(up_u),
+            lower_limit: px(down_u), prev_close: px(prev_u), suspended: false, call_auction: true, auction: info,
+        });
+    }
+
     let side = |levels: &[(f64, f64); 5]| -> Vec<(i64, u64)> {
         levels
             .iter()
@@ -189,21 +232,19 @@ pub fn normalize(q: &RawQuote, meta: &SymbolMeta, trade_date: NaiveDate) -> Resu
 
     if let (Some(b), Some(a)) = (bids.first(), asks.first()) {
         if b.0 >= a.0 {
-            return Err(Skip::CrossedBook); // closing call auction (14:57-15:00) shows a virtual matched book
+            return Err(Skip::CrossedBook); // a virtual matched book outside the auction windows: not tradable
         }
     }
     if let Some(&(p, _)) = bids.iter().chain(asks.iter()).find(|(p, _)| *p < down_u || *p > up_u) {
         return Err(Skip::LimitMismatch { price: px(p), lower: px(down_u), upper: px(up_u) });
     }
 
-    let vol_shares = (q.vol_lots.max(0.0).round() as u64) * 100;
     let last_u = if q.price > 0.0 { units(q.price, scale) } else { prev_u };
-    let ms = t.num_seconds_from_midnight() as u64 * 1000 + (t.nanosecond() / 1_000_000) as u64;
 
     Ok(Snapshot {
         symbol: meta.symbol.clone(),
         name: meta.name.clone(),
-        ts: format!("{}T{}+08:00", trade_date.format("%Y-%m-%d"), t.format("%H:%M:%S%.3f")),
+        ts,
         seq: ms,
         bids: bids.iter().map(|(p, v)| (px(*p), *v)).collect(),
         asks: asks.iter().map(|(p, v)| (px(*p), *v)).collect(),
@@ -213,6 +254,8 @@ pub fn normalize(q: &RawQuote, meta: &SymbolMeta, trade_date: NaiveDate) -> Resu
         lower_limit: px(down_u),
         prev_close: px(prev_u),
         suspended: bids.is_empty() && asks.is_empty() && vol_shares == 0,
+        call_auction: false,
+        auction: None,
     })
 }
 
@@ -235,6 +278,7 @@ mod tests {
             servertime: t.into(),
             bids: [(10.86, 493.0), (10.85, 100.0), (10.84, 100.0), (10.83, 100.0), (10.8, 239.0)],
             asks: [(10.87, 1439.0), (10.88, 10.0), (10.89, 10.0), (10.90, 10.0), (10.91, 1397.0)],
+            auction: None,
         }
     }
 
@@ -267,16 +311,42 @@ mod tests {
     }
 
     #[test]
-    fn skips_auction_crossed_out_of_session_and_limit_mismatch() {
+    fn skips_crossed_out_of_session_and_limit_mismatch() {
         let meta = SymbolMeta::parse("600000.SH", false).unwrap();
-        assert_eq!(normalize(&q("600000", 1, "09:20:00.000"), &meta, d()), Err(Skip::OutsideSession));
+        assert_eq!(normalize(&q("600000", 1, "09:14:00.000"), &meta, d()), Err(Skip::OutsideSession));
         assert_eq!(normalize(&q("600000", 1, "15:30:02.010"), &meta, d()), Err(Skip::OutsideSession));
-        let mut crossed = q("600000", 1, "14:58:00.000");
+        let mut crossed = q("600000", 1, "10:58:00.000");
         crossed.asks[0] = (10.86, 100.0);
         assert_eq!(normalize(&crossed, &meta, d()), Err(Skip::CrossedBook));
         let mut wrong = q("600000", 1, "10:00:00.000");
         wrong.asks[4] = (12.00, 1.0); // above +10%: wrong board/ST/IPO assumption
         assert!(matches!(normalize(&wrong, &meta, d()), Err(Skip::LimitMismatch { .. })));
+    }
+
+    #[test]
+    fn call_auction_snapshots_carry_the_indicative_match() {
+        let meta = SymbolMeta::parse("600000.SH", false).unwrap();
+        let mut r = q("600000", 1, "09:22:00.000");
+        r.price = 0.0;
+        r.vol_lots = 0.0;
+        r.auction = Some((10.80, 2266.0, 1256.0, 0.0));
+        let s = normalize(&r, &meta, d()).unwrap();
+        assert!(s.call_auction && !s.suspended && s.bids.is_empty() && s.asks.is_empty());
+        assert_eq!(s.last_price, "10.80");
+        assert_eq!(s.auction, Some(AuctionInfo { price: "10.80".into(), volume: 226_600, unmatched_buy: 125_600,
+                                                 unmatched_sell: 0 }));
+        // closing auction: last price stays the last continuous trade until 15:00
+        let mut c = q("600000", 1, "14:59:58.000");
+        c.auction = Some((10.90, 1634.0, 0.0, 3.0));
+        let s = normalize(&c, &meta, d()).unwrap();
+        assert!(s.call_auction && s.last_price == "10.87" && s.cumulative_volume == 100_866_700);
+        // the encoding lingering at 09:25:01 is still the auction; a normal book at 09:25:03 is priced
+        let mut late = q("600000", 1, "09:25:01.000");
+        late.auction = Some((10.80, 2266.0, 0.0, 0.0));
+        assert!(normalize(&late, &meta, d()).unwrap().call_auction);
+        assert!(!normalize(&q("600000", 1, "09:25:03.000"), &meta, d()).unwrap().call_auction);
+        let json = serde_json::to_string(&normalize(&q("600000", 1, "10:00:00.000"), &meta, d()).unwrap()).unwrap();
+        assert!(!json.contains("call_auction") && !json.contains("auction"));
     }
 
     #[test]

@@ -37,6 +37,7 @@ class Liquidity(str, Enum):
     MAKER = "maker"              # resting order crossed by a later snapshot
     QUEUE = "queue"              # resting order reached the front of its price-level queue
     BOARD_BREAK = "board_break"  # resting at a limit price when the board opened (炸板)
+    AUCTION = "auction"          # matched in the opening or closing call auction (集合竞价)
 
 
 class RejectCode(str, Enum):
@@ -57,3 +58,4 @@ class RejectCode(str, Enum):
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     UNKNOWN_ORDER = "UNKNOWN_ORDER"
     ORDER_NOT_OPEN = "ORDER_NOT_OPEN"
+    CANCEL_NOT_ALLOWED = "CANCEL_NOT_ALLOWED"

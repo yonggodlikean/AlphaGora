@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, ApiError, getToken, type AgentState, type OrderView, type Snapshot, type SymbolRow } from "@/lib/api";
+import { api, ApiError, cancelBlocked, getToken, type AgentState, type OrderView, type Snapshot, type SymbolRow } from "@/lib/api";
 import { arrow, int, lots, pct, pctRaw, upColor, yuan } from "@/lib/format";
 import { usePoll, useEvents } from "@/lib/useEvents";
 import { DeviceToken, TokenLogin } from "@/components/TokenLogin";
@@ -101,7 +101,8 @@ function Desk() {
       setOrders((os) => os.map((o) => (o.order_id === d.order_id ? { ...o, queue_ahead: d.queue_ahead as number, queue_progress_pct: d.progress_pct as number } : o)));
     } else if (e.type === "order.filled" || e.type === "order.partially_filled") {
       const name = (d.symbol_name as string) || (d.symbol as string);
-      if (d.liquidity === "queue") setToast({ text: `排到了！${name} ${lots(d.fill_qty as number)} 手已在涨停价成交。明天才能卖（T+1）`, kind: "good" });
+      if (d.liquidity === "auction") setToast({ text: `竞价成交！${name} ${lots(d.fill_qty as number)} 手 @ ${d.fill_price}`, kind: "good" });
+      else if (d.liquidity === "queue") setToast({ text: `排到了！${name} ${lots(d.fill_qty as number)} 手已在涨停价成交。明天才能卖（T+1）`, kind: "good" });
       else if (d.liquidity === "board_break") setToast({ text: `炸板了！${name} ${lots(d.fill_qty as number)} 手在涨停价成交，喜提「炸板接盘侠」`, kind: "good" });
       loadAccount();
     } else if (e.type === "badge.awarded") {
@@ -115,6 +116,7 @@ function Desk() {
   const pickPrice = useCallback((b: Snapshot | null, s: "buy" | "sell") => {
     if (!b) return null;
     const d = decimalsOf(b.symbol);
+    if (b.call_auction) return toTicks(b.auction?.price ?? b.last_price, d);   // auction: the indicative price
     if (s === "buy") return toTicks(b.asks[0]?.[0] ?? b.upper_limit, d);
     return toTicks(b.bids[0]?.[0] ?? b.lower_limit, d);
   }, []);
@@ -240,7 +242,20 @@ function Desk() {
               <div className="between small muted" style={{ fontFamily: "inherit", marginBottom: 6 }}>
                 <span>五档盘口</span><span>{book ? `涨停 ${book.upper_limit} · 跌停 ${book.lower_limit}` : ""}</span>
               </div>
-              {book && book.asks.length === 0 ? <div className="bold" style={{ padding: "10px 0", textAlign: "center", color: "var(--up-soft)" }}>卖盘全空 · 涨停封板中</div> : null}
+              {book?.call_auction ? (
+                <div className="stack" style={{ gap: 4, padding: "10px 0", textAlign: "center" }}>
+                  <span className="bold" style={{ color: "var(--gold)" }}>
+                    {state?.market.phase === "closing_auction" ? "收盘集合竞价 · 15:00 统一成交" : "开盘集合竞价 · 09:25 统一成交"}
+                  </span>
+                  {book.auction ? (
+                    <span className="small">虚拟撮合价 <b className="mono">{book.auction.price}</b> · 撮合 {lots(book.auction.volume)} 手
+                      {book.auction.unmatched_buy ? ` · 买方多 ${lots(book.auction.unmatched_buy)} 手` : ""}
+                      {book.auction.unmatched_sell ? ` · 卖方多 ${lots(book.auction.unmatched_sell)} 手` : ""}</span>
+                  ) : <span className="small muted">还没有撮合价</span>}
+                  <span className="small muted">只接受限价单；价格比撮合价更好的单按撮合价成交</span>
+                </div>
+              ) : null}
+              {book && !book.call_auction && book.asks.length === 0 ? <div className="bold" style={{ padding: "10px 0", textAlign: "center", color: "var(--up-soft)" }}>卖盘全空 · 涨停封板中</div> : null}
               {asks.map((l) => <BookLine key={l.label} {...l} color="var(--down)" />)}
               <div style={{ borderTop: "1px dashed var(--line-2)", margin: "6px 0" }} />
               {bids.map((l) => <BookLine key={l.label} {...l} color="var(--up)" />)}
@@ -309,7 +324,7 @@ function Desk() {
           <section className="card stack" aria-labelledby="orders-title">
             <h2 id="orders-title">我的委托</h2>
             {orders.length === 0 ? <p className="empty">还没有委托。看到封板的票，试试「涨停价排队」。</p> : null}
-            {orders.slice(0, 12).map((o) => <OrderCard key={o.order_id} o={o} onCancel={() => cancel(o.order_id)} />)}
+            {orders.slice(0, 12).map((o) => <OrderCard key={o.order_id} o={o} onCancel={() => cancel(o.order_id)} blocked={cancelBlocked(state?.market)} />)}
           </section>
           <section className="card stack" aria-labelledby="pos-title" style={{ gap: 4 }}>
             <h2 id="pos-title" style={{ marginBottom: 6 }}>我的持仓</h2>
@@ -353,7 +368,7 @@ function BookLine({ label, p, v, color }: { label: string; p: string; v: number;
   );
 }
 
-function OrderCard({ o, onCancel }: { o: OrderView; onCancel: () => void }) {
+function OrderCard({ o, onCancel, blocked }: { o: OrderView; onCancel: () => void; blocked: string | null }) {
   const open = o.status === "new" || o.status === "partially_filled";
   const queued = open && o.queue_ahead !== null && o.queue_initial !== null && o.queue_initial > 0;
   const [label, cls] = o.status === "filled" && o.queue_initial ? ["排到了 · 已成交", "pill-up"] : queued ? ["排队中", "pill-gold"] : STATUS[o.status] ?? [o.status, "pill-gray"];
@@ -375,7 +390,12 @@ function OrderCard({ o, onCancel }: { o: OrderView; onCancel: () => void }) {
           <span className="mono small muted">前方还有 {int(Math.ceil((o.queue_ahead ?? 0) / 100))} 手 · {Math.round(p)}%</span>
         </>
       ) : null}
-      {open ? <button type="button" className="btn btn-ghost small" style={{ alignSelf: "flex-start", minHeight: 40 }} onClick={onCancel}>撤单</button> : null}
+      {open ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button type="button" className="btn btn-ghost small" style={{ minHeight: 40 }} onClick={onCancel} disabled={!!blocked}>撤单</button>
+          {blocked ? <span className="small muted">{blocked}</span> : null}
+        </div>
+      ) : null}
     </article>
   );
 }

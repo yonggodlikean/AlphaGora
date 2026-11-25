@@ -65,6 +65,7 @@ class Order:
     reserve_price: Decimal = ZERO     # buy orders: worst-case price (limit price, or upper limit for market)
     reserved_cash: Decimal = ZERO     # buy orders: cash held for remaining qty + worst-case fees
     reserved_qty: int = 0             # sell orders: shares held for remaining qty
+    deferred: bool = False            # entered 09:25-09:30: handled as a new arrival at 09:30
 
     @property
     def remaining(self) -> int:

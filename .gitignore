@@ -11,3 +11,9 @@ data/tape/*
 target/
 next-env.d.ts
 *.tsbuildinfo
+
+# certificates and keys never belong in the repo
+*.pem
+*.key
+*.crt
+*.p12

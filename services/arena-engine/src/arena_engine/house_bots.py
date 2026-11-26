@@ -5,7 +5,7 @@ mistakes them for LLM output.
 
     红利派   dividend low-volatility (in the spirit of CSI 红利低波): CSI 300 ∪ SSE 50, top 30 by trailing
              dividend yield, then the 10 least volatile; equal weight, rebalanced on the month's first trading day.
-    动量狗   first-board limit-up (首板打板): only a stock's first limit-up, sealed before 11:00 with a thick
+    动量狗   first-board limit-up (首板打板): only a stock's first limit-up (at most 5 held, 15% each), sealed before 11:00 with a thick
              seal, never a one-price board; next day it stays only while the board holds, out by day 3.
     反指王   short-term mean reversion (Connors RSI(2)): above the 200-day line but RSI(2) < 10 with -3% in two
              days, or -10% in three,
@@ -31,6 +31,7 @@ from .market.history import History, rsi, ret, sma, volatility
 from .market.snapshot import L1Snapshot
 
 MODEL = "rules-v1"
+BOARD_CAP = 5            # 动量狗: filled first boards held at once, 15% each
 ZERO = Decimal("0")
 
 
@@ -286,12 +287,12 @@ class HouseBots:
             out.append(Intent(pid, sym, Side.SELL, OrderType.LIMIT, n, b.bid1.price,
                               f"{self._name(mv, sym)}：不板就走", why, [_r("纪律", "sell", why)]))
         holding = self._holdings(acct)
-        if holding >= 3:
+        if holding >= BOARD_CAP:
             # the cap is met with filled boards: stop queuing for more
             for sym, oid in sorted(self._pending.get(pid, {}).items()):
                 if not (acct.positions.get(sym) and acct.positions[sym].qty):
                     out.append(Intent(pid, sym, Side.BUY, OrderType.LIMIT, 0, None, f"{self._name(mv, sym)}：撤单",
-                                      "已经排到 3 个板，撤掉其余排队。", cancel_order_id=oid))
+                                      f"已经排到 {BOARD_CAP} 个板，撤掉其余排队。", cancel_order_id=oid))
             return out
         if now >= time(11, 0) or mv.history is None:
             return out
@@ -314,7 +315,7 @@ class HouseBots:
                 continue
             picks.append((ratio, seal_amt, b))
         for ratio, seal_amt, b in sorted(picks, key=lambda x: (-x[0], -x[1])):
-            if holding >= 3:
+            if holding >= BOARD_CAP:
                 break
             qty = self.lots_for(self._budget(acct, eq, "0.15"), b.upper_limit)
             if qty == 0:
@@ -327,7 +328,7 @@ class HouseBots:
                 _r("多头", "buy", f"首板，{sealed_at} 封死，封单 {seal_amt / 1e8:.2f} 亿元"
                                   + (f"，占流通市值 {ratio * 100:.1f}%。" if ratio else "。")),
                 _r("空头", "hold", "封单够厚、不是一字板，排得进去；炸板就认。"),
-                _r("风控", "buy", "仓位 15%，最多同时 3 只；明天不连板就走。"),
+                _r("风控", "buy", f"仓位 15%，最多同时 {BOARD_CAP} 只；明天不连板就走。"),
                 _r("主席", "buy", "按人设执行：打。"),
             ]
             out.append(Intent(pid, sym, Side.BUY, OrderType.LIMIT, qty, b.upper_limit,

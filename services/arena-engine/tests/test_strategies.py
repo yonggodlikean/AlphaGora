@@ -161,7 +161,7 @@ def test_actions_beyond_two_per_minute_are_retried_next_minute():
     assert len(set(seen)) == 10            # all ten targets bought over five minutes, none twice
 
 
-def test_only_filled_boards_count_and_the_rest_are_cancelled_at_three():
+def test_only_filled_boards_count_and_the_rest_are_cancelled_at_the_cap():
     hist = {f"60000{i}.SH": bars([10.0] * 30) for i in range(1, 7)}
     books = [book(s, 0, "10.00", sealed=True, bid_vol=2_500_000) for s in hist]
     opened = {s: D("10.20") for s in hist}
@@ -170,11 +170,17 @@ def test_only_filled_boards_count_and_the_rest_are_cancelled_at_three():
     mv.pending_buys = {"p": {"600001.SH": "o1", "600002.SH": "o2"}}
     out = bots("limit_up_momentum").decide(mv, {"p": account()})
     assert len(out) == 2 and not {i.symbol for i in out} & {"600001.SH", "600002.SH"}
-    # three filled, two still queued: cancel those, place nothing new
+    # five filled, one still queued: cancel it, place nothing new
     mv = view(books, hist, time(10, 9), day_open=opened)
-    mv.pending_buys = {"p": {"600004.SH": "o4", "600005.SH": "o5"}}
-    filled = account(positions={"600001.SH": (100, 11.0), "600002.SH": (100, 11.0), "600003.SH": (100, 11.0)})
+    mv.pending_buys = {"p": {"600006.SH": "o6"}}
+    filled = account(positions={f"60000{i}.SH": (100, 11.0) for i in range(1, 6)})
     for p in filled.positions.values():
         p.frozen_qty = p.qty                     # bought today: not sellable, so no exit intents
     out = bots("limit_up_momentum").decide(mv, {"p": filled})
-    assert sorted(i.cancel_order_id for i in out) == ["o4", "o5"]
+    assert [i.cancel_order_id for i in out] == ["o6"]
+    # four filled: still room for one more board
+    four = account(positions={f"60000{i}.SH": (100, 11.0) for i in range(1, 5)})
+    for p in four.positions.values():
+        p.frozen_qty = p.qty
+    out = bots("limit_up_momentum").decide(view(books, hist, time(10, 9), day_open=opened), {"p": four})
+    assert len(out) == 1 and out[0].symbol in {"600005.SH", "600006.SH"} and not out[0].cancel_order_id

@@ -558,7 +558,12 @@ class ArenaService:
                 "gateway_down", down, "行情网关无响应",
                 "market-gateway 超过 2 分钟没有心跳。检查：docker compose logs --tail 50 market-gateway", "critical")
             last = _parse_ts(status.get("last_publish"))
-            stalled = not down and status.get("session") == "1" and (last is None or (now - last).total_seconds() > 90)
+            # Only continuous trading guarantees fresh quotes every few seconds: in the call auctions, 09:25-09:30
+            # and the first minute of a session, a quiet book is normal.
+            settled_in = self.calendar.is_continuous_trading(now - timedelta(seconds=90))
+            stalled = (not down and status.get("session") == "1" and settled_in
+                       and self.calendar.is_continuous_trading(now)
+                       and (last is None or (now - last).total_seconds() > 90))
             await self.alerter.update(
                 "feed_stalled", stalled, "交易时段行情断流",
                 f"网关在线，但超过 90 秒没有新行情（最后一次：{last.strftime('%H:%M:%S') if last else '今天还没有'}）。"

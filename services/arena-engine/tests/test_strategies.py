@@ -143,3 +143,19 @@ def test_dividend_low_vol_picks_high_yield_then_low_volatility():
     assert all("股息率" in i.rounds[0]["argument"] for i in out)
 
 
+
+
+def test_actions_beyond_two_per_minute_are_retried_next_minute():
+    hist, books = {}, []
+    for i in range(40):
+        sym = f"60{i:04d}.SH"
+        wiggle = 0.002 + i * 0.001
+        hist[sym] = bars([10 * (1 + (wiggle if k % 2 else -wiggle)) for k in range(70)], div=0.2 + 0.01 * (i % 20))
+        books.append(book(sym, "10.00", "10.00"))
+    b = bots("dividend_conservative")
+    seen = []
+    for minute in range(5):
+        out = b.decide(view(books, hist, time(10, minute)), {"p": account()})
+        assert len(out) == 2
+        seen += [i.symbol for i in out]
+    assert len(set(seen)) == 10            # all ten targets bought over five minutes, none twice

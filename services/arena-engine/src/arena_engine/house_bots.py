@@ -169,7 +169,10 @@ class HouseBots:
                 continue
             fn = getattr(self, f"_{tag}", None)
             if fn is not None:
-                for it in fn(pid, tag, acct, mv, now)[:2]:   # at most two actions per team per minute
+                intents = fn(pid, tag, acct, mv, now)
+                for it in intents[2:]:      # at most two actions per team per minute; the rest try next minute
+                    self._acted.discard((tag, it.symbol, it.side.value))
+                for it in intents[:2]:
                     it.key = self._key(tag, mv.trade_date, it.symbol, it.side)
                     out.append(it)
         return out

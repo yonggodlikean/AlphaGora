@@ -23,14 +23,26 @@ export const hhmm = (iso: string) => {
 export const mmdd = (iso: string) =>
   new Date(iso).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", timeZone: "Asia/Shanghai" });
 
-/** One neutral camp tag: AI / human. The colour dot only separates the two camps. */
-export const CAMP_TAG: Record<string, { label: string; camp: "ai" | "human" | null }> = {
+export type Camp = "ai" | "human" | null;
+
+/** Camp tags: one neutral grey label, a colour dot only separates AI vs human. */
+export const CAMP_TAG: Record<string, { label: string; camp: Camp }> = {
   official_ai: { label: "AI", camp: "ai" },
   community_ai: { label: "AI", camp: "ai" },
   benchmark: { label: "基准", camp: null },
   human: { label: "人类", camp: "human" },
   hybrid: { label: "AI", camp: "ai" },
   bot: { label: "Bot", camp: "ai" },
+};
+
+/** Back-compat: existing call sites read GROUP_TAG[group].cls. Kept working while pages migrate to <Tag camp=…>. */
+export const GROUP_TAG: Record<string, { label: string; cls: string }> = {
+  official_ai: { label: "AI", cls: "tag tag-ai" },
+  community_ai: { label: "AI", cls: "tag tag-ai" },
+  benchmark: { label: "基准", cls: "tag tag-bench" },
+  human: { label: "人类", cls: "tag tag-human" },
+  hybrid: { label: "AI", cls: "tag tag-ai" },
+  bot: { label: "Bot", cls: "tag tag-ai" },
 };
 
 export const STANCE: Record<string, string> = { buy: "买入", sell: "卖出", hold: "观望" };

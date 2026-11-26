@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, ApiError, cancelBlocked, getToken, type AgentState, type OrderView, type Snapshot, type SymbolRow } from "@/lib/api";
+import { api, ApiError, cancelBlocked, getToken, type AgentState, type OrderView, type OrdersDay, type OrdersPage, type Snapshot, type SymbolRow } from "@/lib/api";
 import { arrow, int, lots, pct, pctRaw, upColor, yuan } from "@/lib/format";
 import { usePoll, useEvents } from "@/lib/useEvents";
 import { DeviceToken, TokenLogin } from "@/components/TokenLogin";
@@ -64,9 +64,24 @@ function Desk() {
     api<AgentState>("/api/v1/agent/state", { auth: true }).then(setState).catch((e: ApiError) => {
       if (e.status === 401) setToast({ text: "登录已失效，请重新报名", kind: "bad" });
     });
-    api<{ orders: OrderView[] }>("/api/v1/agent/orders", { auth: true }).then((r) => setOrders(r.orders)).catch(() => undefined);
+    api<OrdersPage>("/api/v1/agent/orders?scope=today", { auth: true }).then((r) => setOrders(r.orders)).catch(() => undefined);
   }, []);
   usePoll(loadAccount, 8000);
+  const [orderTab, setOrderTab] = useState<"today" | "history">("today");
+  const [history, setHistory] = useState<OrdersDay[] | null>(null);
+  const [historyNext, setHistoryNext] = useState<string | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  async function loadHistory(before: string | null) {
+    setHistoryBusy(true);
+    try {
+      const r = await api<OrdersPage>(`/api/v1/agent/orders?scope=history${before ? `&before=${before}` : ""}`, { auth: true });
+      setHistory((h) => (before ? [...(h ?? []), ...r.days] : r.days));
+      setHistoryNext(r.next_before);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+  const showHistory = () => { setOrderTab("history"); if (history === null) loadHistory(null); };
   const [query, setQuery] = useState("");
   const [listTab, setListTab] = useState<ListTab>("hot");
   const [listInfo, setListInfo] = useState<{ total: number; sealed: number }>({ total: 0, sealed: 0 });
@@ -322,9 +337,38 @@ function Desk() {
 
         <div className="side stack" style={{ gap: 20 }}>
           <section className="card stack" aria-labelledby="orders-title">
-            <h2 id="orders-title">我的委托</h2>
-            {orders.length === 0 ? <p className="empty">还没有委托。看到封板的票，试试「涨停价排队」。</p> : null}
-            {orders.slice(0, 12).map((o) => <OrderCard key={o.order_id} o={o} onCancel={() => cancel(o.order_id)} blocked={cancelBlocked(state?.market)} />)}
+            <div className="between">
+              <h2 id="orders-title">我的委托</h2>
+              <div className="tabs" role="tablist" aria-label="委托">
+                <button type="button" role="tab" className="tab" aria-selected={orderTab === "today"} onClick={() => setOrderTab("today")}>当日</button>
+                <button type="button" role="tab" className="tab" aria-selected={orderTab === "history"} onClick={showHistory}>历史</button>
+              </div>
+            </div>
+            {orderTab === "today" ? (
+              <>
+                {orders.length === 0 ? <p className="empty">今天还没有委托。看到封板的票，试试「涨停价排队」。</p> : null}
+                {orders.map((o) => <OrderCard key={o.order_id} o={o} onCancel={() => cancel(o.order_id)} blocked={cancelBlocked(state?.market)} />)}
+              </>
+            ) : (
+              <>
+                {history === null ? <p className="empty">加载中…</p> : null}
+                {history && history.length === 0 ? <p className="empty">还没有更早的委托。</p> : null}
+                {history?.map((d) => (
+                  <div key={d.date} className="stack" style={{ gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--muted)", fontSize: 12 }}>
+                      <span className="mono bold" style={{ color: "var(--text-2)" }}>{d.date.slice(5)} 周{d.weekday}</span>
+                      <span>{d.orders.length} 笔委托</span>
+                      <span style={{ flex: 1, borderTop: "1px solid #1f222b" }} />
+                    </div>
+                    {d.orders.map((o) => <OrderCard key={o.order_id} o={o} onCancel={() => undefined} blocked={null} />)}
+                  </div>
+                ))}
+                {historyNext ? (
+                  <button type="button" className="btn btn-ghost" style={{ alignSelf: "center" }} disabled={historyBusy}
+                    onClick={() => loadHistory(historyNext)}>{historyBusy ? "加载中…" : "更早的委托"}</button>
+                ) : null}
+              </>
+            )}
           </section>
           <section className="card stack" aria-labelledby="pos-title" style={{ gap: 4 }}>
             <h2 id="pos-title" style={{ marginBottom: 6 }}>我的持仓</h2>

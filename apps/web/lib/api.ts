@@ -100,7 +100,7 @@ export type OrderView = {
 };
 export type Feed = {
   conflicts: Conflict[]; roast: { trade_date: string; text: string; lines: Record<string, string> } | null;
-  queues: OrderView[]; market: Market; season: { slug: string; name: string; start: string; end: string; trading_days: number };
+  conflicts_today?: number; queues: OrderView[]; market: Market; season: { slug: string; name: string; start: string; end: string; trading_days: number };
 };
 export type SymbolRow = {
   symbol: string; name: string; last: string; prev_close: string; chg_pct: number; upper_limit: string;
@@ -136,6 +136,12 @@ export type Profile = {
   season?: { slug: string; name: string };
   career?: { season: string; name: string; rank: number | null; cum_return: number | null; excess_return: number | null; trades: number }[];
 };
+export type TimelineKind = "all" | "filled" | "conflict";
+export type TimelineDay = { date: string; weekday: string; debates: number; fills: number; day_return: number | null; items: TimelineItem[] };
+export type TimelinePage = { days: TimelineDay[]; items: TimelineItem[]; next_before: string | null; total: number };
+export type OrdersDay = { date: string; weekday: string; orders: OrderView[] };
+export type OrdersPage = { orders: OrderView[]; days: OrdersDay[]; next_before: string | null };
+export type ConflictsDay = { date: string; weekday: string; conflicts: Conflict[]; prev: string | null };
 export type Seats = { invite_required: boolean; human: { taken: number; total: number }; ai: { taken: number; total: number } };
 export type TimelineOrder = {
   order_id: string; side: "buy" | "sell"; order_type: string; price: string | null; qty: number; filled_qty: number;

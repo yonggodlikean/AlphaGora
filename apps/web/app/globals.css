@@ -77,10 +77,14 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-weight: 700;
 .board-head { color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); }
 .board-row { min-height: 52px; border-bottom: 1px solid #1f222b; color: var(--text); text-decoration: none; }
 .board-row:hover { background: #1c1f27; color: var(--text); }
-.scroll-x { overflow-x: auto; }
+/* No scroll container here: it would stop the signed-in player's row (.board-mine) from sticking to the
+   bottom of the screen. Below 760px the board switches to three columns instead of scrolling sideways. */
+.scroll-x { overflow-x: visible; }
 .board-min { min-width: 640px; }
+.board-mine { position: sticky; bottom: 0; z-index: 1; background: #1c1f27; border: 1px solid var(--gold-line);
+  border-radius: 10px; box-shadow: 0 -8px 16px rgba(14, 15, 18, 0.85); }
 /* Phones: rank · team · total return; the sparkline, excess and today columns go away. */
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .board-min { min-width: 0; }
   .board-head, .board-row { grid-template-columns: 28px minmax(0, 1fr) 84px; gap: 8px; padding: 10px 8px; }
   .col-spark, .col-excess, .col-day { display: none; }

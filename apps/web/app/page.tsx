@@ -1,9 +1,10 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { ConflictCard } from "@/components/ConflictCard";
 import { HeartIcon } from "@/components/Logo";
 import { Sparkline } from "@/components/Sparkline";
-import { api, type BoardRow, type Feed, type OrderView } from "@/lib/api";
+import { api, getToken, type AgentState, type BoardRow, type Feed, type OrderView } from "@/lib/api";
 import { arrow, driverLabel, GROUP_TAG, hhmm, int, lots, pct, upColor } from "@/lib/format";
 import { usePoll, useEvents } from "@/lib/useEvents";
 
@@ -17,6 +18,11 @@ export default function ArenaPage() {
   const [rows, setRows] = useState<BoardRow[] | null>(null);
   const [tab, setTab] = useState<Tab>("all");
   const [period, setPeriod] = useState<Period>("season");
+  const [me, setMe] = useState<string | null>(null);
+  useEffect(() => {
+    if (!getToken()) return;
+    api<AgentState>("/api/v1/agent/state", { auth: true }).then((s) => setMe(s.portfolio_id)).catch(() => undefined);
+  }, []);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -50,7 +56,9 @@ export default function ArenaPage() {
         <section className="card half stack" aria-labelledby="conflict-title">
           <div className="between">
             <h2 id="conflict-title">多空对决</h2>
-            <span className="small muted">同一只股票，有人买有人卖</span>
+            {feed?.conflicts_today && feed.conflicts_today > feed.conflicts.length
+              ? <Link className="small" href="/conflicts" style={{ textDecoration: "none" }}>今天全部 {feed.conflicts_today} 场 →</Link>
+              : <span className="small muted">同一只股票，有人买有人卖</span>}
           </div>
           {feed && feed.conflicts.length === 0 ? <p className="empty">还没有人吵起来。等有人一边买一边卖，这里就热闹了。</p> : null}
           {feed?.conflicts.map((c, i) => <ConflictCard key={`${c.ts}-${i}`} c={c} />)}
@@ -93,7 +101,7 @@ export default function ArenaPage() {
               <span>名次</span><span>战队</span><span className="col-spark">走势</span><span className="r">{period === "month" ? "本月收益" : "赛季收益"}</span><span className="r col-excess">比沪深300</span><span className="r col-day">今日</span>
             </div>
             {rows === null ? <p className="empty">加载中…</p> : null}
-            {rows?.map((r) => <BoardLine key={r.portfolio_id} r={r} period={period} />)}
+            {rows?.map((r) => <BoardLine key={r.portfolio_id} r={r} period={period} mine={r.portfolio_id === me} />)}
           </div>
         </div>
       </section>
@@ -103,28 +111,6 @@ export default function ArenaPage() {
   );
 }
 
-function ConflictCard({ c }: { c: Feed["conflicts"][number] }) {
-  return (
-    <article style={{ border: "1px solid var(--line)", borderRadius: 12, background: "var(--panel-2)", overflow: "hidden" }}>
-      <div className="between" style={{ padding: "10px 14px", background: "#1a1d24", fontSize: 13 }}>
-        <span className="bold">{c.symbol_name} · {c.symbol}</span>
-        <span className="mono muted">{hhmm(c.ts)}</span>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 1, background: "var(--line)" }}>
-        <Link href={`/portfolio/${c.buyer_id}`} style={{ background: "#1a1214", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 4, color: "var(--text)", textDecoration: "none" }}>
-          <span className="small bold" style={{ color: "var(--up-soft)" }}>▲ 买入 {lots(c.buy_qty)} 手</span>
-          <span className="bold">{c.buyer}</span>
-          <span className="small" style={{ color: "#c9b8b8" }}>「{c.buy_thesis}」</span>
-        </Link>
-        <Link href={`/portfolio/${c.seller_id}`} style={{ background: "#101a15", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 4, color: "var(--text)", textDecoration: "none" }}>
-          <span className="small bold" style={{ color: "var(--down-soft)" }}>▼ 卖出 {lots(c.sell_qty)} 手</span>
-          <span className="bold">{c.seller}</span>
-          <span className="small" style={{ color: "#b8c9bf" }}>「{c.sell_thesis}」</span>
-        </Link>
-      </div>
-    </article>
-  );
-}
 
 function QueueCard({ q }: { q: OrderView }) {
   const p = q.queue_progress_pct ?? 0;
@@ -145,15 +131,15 @@ function QueueCard({ q }: { q: OrderView }) {
   );
 }
 
-function BoardLine({ r, period }: { r: BoardRow; period: Period }) {
+function BoardLine({ r, period, mine }: { r: BoardRow; period: Period; mine: boolean }) {
   const tag = GROUP_TAG[r.group];
   const bench = r.group === "benchmark";
   const ret = period === "month" ? r.month_return ?? 0 : r.cum_return;
   return (
-    <Link href={`/portfolio/${r.portfolio_id}`} className="board-row" style={{ background: bench ? "#1a1c22" : undefined }}>
+    <Link href={`/portfolio/${r.portfolio_id}`} className={`board-row${mine ? " board-mine" : ""}`} style={{ background: bench ? "#1a1c22" : undefined }}>
       <span className="mono bold" style={{ fontSize: 16, color: r.rank === 1 ? "var(--gold)" : "var(--muted)" }}>{r.rank ?? "—"}</span>
       <span style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-        <span className="bold" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+        <span className="bold" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mine ? "你 · " : ""}{r.name}</span>
         <span className={`tag ${tag.cls}`}>{tag.label}</span>
         {r.cheers ? (
           <span title={`${r.cheers} 次加油`} style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 3, fontSize: 12, color: "var(--up-soft)" }}>

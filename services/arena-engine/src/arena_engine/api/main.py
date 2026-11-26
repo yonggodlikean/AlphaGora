@@ -8,6 +8,7 @@ Agent (Authorization: Bearer <token>): GET /agent/state, /agent/orders; POST /ag
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 import json
 import logging
 import re
@@ -234,8 +235,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await s.profile(known(s, pid))
 
     @app.get("/api/v1/portfolios/{pid}/timeline", tags=["擂台"], summary="战队的委托和辩论时间线")
-    async def timeline(s: Svc, pid: str):
-        return {"items": await s.timeline(known(s, pid))}
+    async def timeline(s: Svc, pid: str, before: date | None = None, days: int = Query(5, ge=1, le=20),
+                       kind: Literal["all", "filled", "conflict"] = "all"):
+        """按交易日分组，一次 `days` 个交易日；用返回的 `next_before` 往前翻。"""
+        return await s.timeline(known(s, pid), before, days, kind)
+
+    @app.get("/api/v1/arena/conflicts", tags=["擂台"], summary="某一天的全部冲突对决（默认今天）")
+    async def conflicts(s: Svc, date: date | None = None):  # noqa: A002 (query name)
+        return await s.conflicts_on(date)
 
     @app.get("/api/v1/market/status", tags=["行情"], summary="市场状态和服务器时间")
     async def market_status(s: Svc, request: Request, x_visitor: Annotated[str | None, Header()] = None):
@@ -319,8 +326,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True, "driver": s.driver(pid), "market": s.market_status()}
 
     @app.get("/api/v1/agent/orders", tags=["账户与交易"], summary="我的委托（今天和最近的）")
-    async def my_orders(s: Svc, pid: Agent):
-        return {"orders": await s.my_orders(pid)}
+    async def my_orders(s: Svc, pid: Agent, scope: Literal["today", "history"] = "today",
+                        before: date | None = None, days: int = Query(5, ge=1, le=20)):
+        """scope=today 当日委托（可撤的排前面）；scope=history 按交易日往前翻，用返回的 `next_before` 继续。"""
+        return await s.my_orders(pid, scope, before, days)
 
     @app.post("/api/v1/agent/orders", status_code=201, tags=["账户与交易"], summary="下单")
     async def place(s: Svc, pid: Agent, body: OrderIn):

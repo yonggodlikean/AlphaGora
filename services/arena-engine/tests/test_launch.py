@@ -139,3 +139,35 @@ def test_calendar_phase():
     assert [cal.phase(at(wed, h, m)) for h, m in ((8, 0), (9, 20), (9, 30), (11, 30), (12, 59), (13, 0), (15, 0))] == \
         ["pre_open", "auction", "trading", "lunch", "lunch", "trading", "closed"]
     assert cal.phase(at(sat, 10, 0)) == "holiday" and cal.phase(at(date(2026, 10, 1), 10, 0)) == "holiday"
+
+
+@pytest.mark.anyio
+async def test_timeline_orders_and_conflicts_page_by_trading_day(dsn):
+    from test_service_api import DAY2
+    service, client, pool = await boot(dsn)
+    market = DemoMarket(seed=11)
+    for d in (DAY1, DAY2):
+        await play(service, market.day(d))
+        await service.close_day()
+    board = (await client.get("/api/v1/leaderboard")).json()["rows"]
+    dividend = next(r for r in board if r["name"] == "激进打板动量狗")["portfolio_id"]   # trades both days
+    first = (await client.get(f"/api/v1/portfolios/{dividend}/timeline", params={"days": 1})).json()
+    assert len(first["days"]) == 1 and first["days"][0]["date"] == DAY2.isoformat() and first["total"] >= 1
+    assert first["next_before"] == DAY2.isoformat()
+    older = (await client.get(f"/api/v1/portfolios/{dividend}/timeline",
+                              params={"days": 1, "before": first["next_before"]})).json()
+    assert older["days"][0]["date"] == DAY1.isoformat() and older["next_before"] is None
+    assert all(it["day"] == DAY1.isoformat() for it in older["days"][0]["items"])
+    filled = (await client.get(f"/api/v1/portfolios/{dividend}/timeline", params={"kind": "filled"})).json()
+    assert all(it["kind"] == "corporate" or any(o["filled_qty"] for o in it["orders"])
+               for d in filled["days"] for it in d["items"])
+    conflicts = (await client.get("/api/v1/arena/conflicts", params={"date": DAY1.isoformat()})).json()
+    assert conflicts["date"] == DAY1.isoformat() and isinstance(conflicts["conflicts"], list)
+    assert "conflicts_today" in (await client.get("/api/v1/arena/feed")).json()
+
+    r = await client.post("/api/v1/join", json={"display_name": "翻页玩家", "kind": "human"})
+    auth = {"Authorization": f"Bearer {r.json()['token']}"}
+    today = (await client.get("/api/v1/agent/orders", headers=auth)).json()
+    hist = (await client.get("/api/v1/agent/orders", headers=auth, params={"scope": "history"})).json()
+    assert today["orders"] == [] and hist == {"orders": [], "days": [], "next_before": None}
+    await client.aclose(); await service.stop(); await pool.close()

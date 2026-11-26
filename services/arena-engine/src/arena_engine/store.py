@@ -11,6 +11,7 @@ from typing import Any
 
 import asyncpg
 
+from .market.calendar import CST
 from .domain.models import ZERO, Fill, Order, Position
 from .ledger.journal import Journal, Posting, fill_journal, funding_journal
 from .domain.errors import PublicError
@@ -466,12 +467,13 @@ class Store:
         return None if v is None else str(v)
 
     async def create_debate(self, portfolio_id: str, symbol: str, rounds: list[dict], final_decision: dict,
-                            execution_trace: Any | None, trace_hash: str | None) -> dict:
+                            execution_trace: Any | None, trace_hash: str | None, created_at: datetime | None = None) -> dict:
         r = await self.pool.fetchrow(
-            "INSERT INTO debates (portfolio_id, symbol, rounds, final_decision, execution_trace, execution_trace_hash) "
-            "VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6) RETURNING id, has_conflict, created_at",
+            "INSERT INTO debates (portfolio_id, symbol, rounds, final_decision, execution_trace, execution_trace_hash, "
+            "created_at) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, COALESCE($7, now())) "
+            "RETURNING id, has_conflict, created_at",
             uuid.UUID(portfolio_id), symbol, _json(rounds), _json(final_decision),
-            None if execution_trace is None else _json(execution_trace), trace_hash)
+            None if execution_trace is None else _json(execution_trace), trace_hash, created_at)
         return {"debate_id": str(r["id"]), "has_conflict": r["has_conflict"], "created_at": r["created_at"]}
 
     async def recent_orders(self, portfolio_id: str, limit: int = 30) -> list[asyncpg.Record]:
@@ -664,21 +666,54 @@ class Store:
             season_id, after_id, limit)
         return [{"id": r["id"], "type": r["event_type"], "data": json.loads(r["payload"])} for r in rows]
 
-    async def timeline(self, portfolio_id: str, limit: int = 40) -> list[dict]:
+    # A decision's trading day: debates and corporate actions by their CST date, orders by their trade date.
+    _DAYS_SQL = """
+        SELECT day FROM (
+          SELECT (d.created_at AT TIME ZONE 'Asia/Shanghai')::date AS day FROM debates d
+           WHERE d.portfolio_id = $1 AND ($3 <> 'conflict' OR d.has_conflict)
+             AND ($3 <> 'filled' OR EXISTS (SELECT 1 FROM orders o WHERE o.debate_id = d.id AND o.filled_qty > 0))
+          UNION SELECT o.trade_date FROM orders o
+           WHERE o.portfolio_id = $1 AND o.debate_id IS NULL AND $3 <> 'conflict' AND ($3 <> 'filled' OR o.filled_qty > 0)
+          UNION SELECT (j.created_at AT TIME ZONE 'Asia/Shanghai')::date FROM ledger_journals j
+           WHERE j.portfolio_id = $1 AND j.ref_type = 'corporate_action' AND $3 <> 'conflict'
+        ) x WHERE $2::date IS NULL OR day < $2::date"""
+
+    async def timeline_days(self, portfolio_id: str, before: date | None, days: int, kind: str) -> tuple[list[date], bool, int]:
+        """The `days` most recent trading days with decisions before `before`, whether older ones exist, and how
+        many decisions the whole (filtered) history has."""
+        pid = uuid.UUID(portfolio_id)
+        rows = await self.pool.fetch(f"SELECT DISTINCT day FROM ({self._DAYS_SQL}) y ORDER BY day DESC LIMIT $4",
+                                     pid, before, kind, days + 1)
+        found = [r["day"] for r in rows]
+        total = await self.pool.fetchval(
+            """SELECT (SELECT count(*) FROM debates d WHERE d.portfolio_id = $1 AND ($2 <> 'conflict' OR d.has_conflict)
+                        AND ($2 <> 'filled' OR EXISTS (SELECT 1 FROM orders o WHERE o.debate_id = d.id AND o.filled_qty > 0)))
+                    + (SELECT count(*) FROM orders o WHERE o.portfolio_id = $1 AND o.debate_id IS NULL AND $2 <> 'conflict'
+                        AND ($2 <> 'filled' OR o.filled_qty > 0))
+                    + (SELECT count(*) FROM ledger_journals j WHERE j.portfolio_id = $1 AND j.ref_type = 'corporate_action'
+                        AND $2 <> 'conflict')""", pid, kind)
+        return found[:days], len(found) > days, int(total)
+
+    async def timeline(self, portfolio_id: str, first: date, last: date) -> list[dict]:
+        """Every decision from `first` to `last` (trading days, inclusive), newest first."""
         pid = uuid.UUID(portfolio_id)
         debates = await self.pool.fetch(
-            "SELECT id, symbol, rounds, final_decision, has_conflict, execution_trace_hash, created_at "
-            "FROM debates WHERE portfolio_id = $1 ORDER BY created_at DESC LIMIT $2", pid, limit)
+            "SELECT id, symbol, rounds, final_decision, has_conflict, execution_trace_hash, created_at FROM debates "
+            "WHERE portfolio_id = $1 AND (created_at AT TIME ZONE 'Asia/Shanghai')::date BETWEEN $2 AND $3 "
+            "ORDER BY created_at DESC", pid, first, last)
         orders = await self.pool.fetch(
             """SELECT o.*, (SELECT string_agg(DISTINCT t.liquidity::text, ',') FROM trades t WHERE t.order_id = o.id)
                           AS liquidities
-               FROM orders o WHERE o.portfolio_id = $1 ORDER BY o.created_at DESC LIMIT $2""", pid, limit * 2)
+               FROM orders o WHERE o.portfolio_id = $1 AND (o.trade_date BETWEEN $2 AND $3
+                 OR o.debate_id IN (SELECT id FROM debates WHERE portfolio_id = $1
+                                    AND (created_at AT TIME ZONE 'Asia/Shanghai')::date BETWEEN $2 AND $3))
+               ORDER BY o.created_at DESC""", pid, first, last)
         by_debate: dict[str, list[asyncpg.Record]] = {}
         loose: list[asyncpg.Record] = []
         for o in orders:
             if o["debate_id"]:
                 by_debate.setdefault(str(o["debate_id"]), []).append(o)
-            else:
+            elif first <= o["trade_date"] <= last:
                 loose.append(o)
         items = []
         for d in debates:
@@ -689,7 +724,7 @@ class Store:
                           "orders": [_order_row(o) for o in by_debate.get(str(d["id"]), [])]})
         for o in loose:
             items.append({"kind": "order", "id": str(o["id"]), "symbol": o["symbol"], "created_at": o["created_at"],
-                          "orders": [_order_row(o)]})
+                          "orders": [_order_row(o)], "_day": o["trade_date"]})
         actions = await self.pool.fetch(
             """SELECT j.id, j.memo, j.created_at,
                       COALESCE(sum(e.amount) FILTER (WHERE e.account = 'cash'), 0) AS cash,
@@ -697,7 +732,8 @@ class Store:
                       max(e.symbol) FILTER (WHERE e.account = 'position') AS pos_symbol
                FROM ledger_journals j JOIN ledger_entries e ON e.journal_id = j.id
                WHERE j.portfolio_id = $1 AND j.ref_type = 'corporate_action'
-               GROUP BY j.id ORDER BY j.created_at DESC LIMIT $2""", pid, limit)
+                 AND (j.created_at AT TIME ZONE 'Asia/Shanghai')::date BETWEEN $2 AND $3
+               GROUP BY j.id ORDER BY j.created_at DESC""", pid, first, last)
         for a in actions:
             words = (a["memo"] or "").split(" ")       # "除权除息 600000.SH 10 派 3（持有 1000 股）"
             symbol = a["pos_symbol"] or (words[1] if len(words) > 1 else "")
@@ -705,8 +741,41 @@ class Store:
                           "memo": a["memo"], "cash": str(a["cash"]), "bonus_shares": int(a["bonus"]), "orders": []})
         items.sort(key=lambda x: x["created_at"], reverse=True)
         for it in items:
+            it["day"] = (it.pop("_day", None) or it["created_at"].astimezone(CST).date()).isoformat()
             it["created_at"] = it["created_at"].isoformat()
-        return items[:limit]
+        return items
+
+    async def day_fills(self, portfolio_id: str, days: list[date]) -> dict[date, int]:
+        rows = await self.pool.fetch("SELECT trade_date, count(*) n FROM trades WHERE portfolio_id = $1 "
+                                     "AND trade_date = ANY($2::date[]) GROUP BY trade_date", uuid.UUID(portfolio_id), days)
+        return {r["trade_date"]: r["n"] for r in rows}
+
+    async def day_returns(self, portfolio_id: str, days: list[date]) -> dict[date, float]:
+        rows = await self.pool.fetch("SELECT trade_date, daily_return FROM daily_snapshots WHERE portfolio_id = $1 "
+                                     "AND trade_date = ANY($2::date[])", uuid.UUID(portfolio_id), days)
+        return {r["trade_date"]: float(r["daily_return"]) for r in rows}
+
+    async def order_days(self, portfolio_id: str, before: date, days: int) -> tuple[list[date], bool]:
+        rows = await self.pool.fetch(
+            "SELECT DISTINCT trade_date FROM orders WHERE portfolio_id = $1 AND trade_date < $2 "
+            "ORDER BY trade_date DESC LIMIT $3", uuid.UUID(portfolio_id), before, days + 1)
+        found = [r["trade_date"] for r in rows]
+        return found[:days], len(found) > days
+
+    async def orders_between(self, portfolio_id: str, first: date, last: date) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            "SELECT * FROM orders WHERE portfolio_id = $1 AND trade_date BETWEEN $2 AND $3 ORDER BY created_at DESC",
+            uuid.UUID(portfolio_id), first, last)
+
+    async def conflicts_on(self, season_id: uuid.UUID, day: date) -> tuple[list[dict], date | None]:
+        """All conflict cards of one CST day (newest first) and the latest earlier day that had any."""
+        rows = await self.pool.fetch(
+            "SELECT payload FROM arena_events WHERE season_id = $1 AND event_type = 'conflict.detected' "
+            "AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = $2 ORDER BY id DESC", season_id, day)
+        prev = await self.pool.fetchval(
+            "SELECT max((created_at AT TIME ZONE 'Asia/Shanghai')::date) FROM arena_events WHERE season_id = $1 "
+            "AND event_type = 'conflict.detected' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date < $2", season_id, day)
+        return [json.loads(r["payload"]) if isinstance(r["payload"], str) else dict(r["payload"]) for r in rows], prev
 
 
 def _order_row(o: asyncpg.Record) -> dict:

@@ -1,10 +1,10 @@
 "use client";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useState } from "react";
+import { Fragment, useCallback, useState } from "react";
 import { Avatar } from "@/components/Avatar";
 import { HeartIcon } from "@/components/Logo";
-import { api, type Profile, type TimelineItem, type TimelineOrder } from "@/lib/api";
+import { api, type Profile, type TimelineDay, type TimelineItem, type TimelineKind, type TimelineOrder, type TimelinePage } from "@/lib/api";
 import { driverLabel, GROUP_TAG, int, lots, mmdd, hhmm, pct, STANCE, upColor, yuan } from "@/lib/format";
 import { usePoll } from "@/lib/useEvents";
 
@@ -36,10 +36,16 @@ function outcome(orders: TimelineOrder[]): { kind: string; cls: string; text: st
   return { kind: o.status === "expired" ? "未成交" : "已撤单", cls: "pill-gray", text: `${side} ${lots(o.qty)} 手 · ${why}`, fees: "" };
 }
 
+const KINDS: [TimelineKind, string][] = [["all", "全部"], ["filled", "有成交"], ["conflict", "多空分歧"]];
+
 export default function PortfolioPage() {
   const { id } = useParams<{ id: string }>();
   const [p, setP] = useState<Profile | null>(null);
-  const [items, setItems] = useState<TimelineItem[] | null>(null);
+  const [days, setDays] = useState<TimelineDay[] | null>(null);
+  const [nextBefore, setNextBefore] = useState<string | null>(null);
+  const [total, setTotal] = useState(0);
+  const [kind, setKind] = useState<TimelineKind>("all");
+  const [more, setMore] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [missing, setMissing] = useState(false);
   const [cheering, setCheering] = useState<"idle" | "busy" | "done">("idle");
@@ -59,12 +65,32 @@ export default function PortfolioPage() {
 
   const load = useCallback(() => {
     api<Profile>(`/api/v1/portfolios/${id}`).then(setP).catch((e) => { if (e.status === 404) setMissing(true); });
-    api<{ items: TimelineItem[] }>(`/api/v1/portfolios/${id}/timeline`).then((r) => {
-      setItems(r.items);
+    api<TimelinePage>(`/api/v1/portfolios/${id}/timeline?kind=${kind}`).then((r) => {
+      // the newest page refreshes; days paged in further back stay
+      setDays((old) => {
+        const oldest = r.days[r.days.length - 1]?.date;
+        const kept = (old ?? []).filter((d) => oldest && d.date < oldest);
+        if (!kept.length) setNextBefore(r.next_before);
+        return [...r.days, ...kept];
+      });
+      setTotal(r.total);
       setOpen((o) => (Object.keys(o).length || !r.items[0] ? o : { [r.items[0].id]: true }));
     }).catch(() => undefined);
-  }, [id]);
+  }, [id, kind]);
   usePoll(load, 10000);
+  const switchKind = (k: TimelineKind) => { setKind(k); setDays(null); setNextBefore(null); };
+  async function loadMore() {
+    if (!nextBefore) return;
+    setMore(true);
+    try {
+      const r = await api<TimelinePage>(`/api/v1/portfolios/${id}/timeline?kind=${kind}&before=${nextBefore}`);
+      setDays((old) => [...(old ?? []), ...r.days.filter((d) => !(old ?? []).some((o) => o.date === d.date))]);
+      setNextBefore(r.next_before);
+      setTotal(r.total);
+    } finally {
+      setMore(false);
+    }
+  }
 
   if (missing) return <main className="wrap"><p className="empty">找不到这支队伍。<Link href="/">回擂台</Link></p></main>;
   if (!p) return <main className="wrap"><p className="empty">加载中…</p></main>;
@@ -180,10 +206,50 @@ export default function PortfolioPage() {
         <section className="card grow stack" aria-labelledby="tl-title" style={{ gap: 16 }}>
           <div className="between">
             <h2 id="tl-title">每一次决定</h2>
-            <span className="small muted">先给理由，再出手，过程全部公开</span>
+            <div className="tabs" role="tablist" aria-label="筛选决定">
+              {KINDS.map(([k, label]) => (
+                <button key={k} type="button" role="tab" className="tab" aria-selected={kind === k} onClick={() => switchKind(k)}>{label}</button>
+              ))}
+            </div>
           </div>
-          {items && items.length === 0 ? <p className="empty">还没有任何决定。</p> : null}
-          {items?.map((it) => {
+          {days && days.length === 0 ? <p className="empty">{kind === "all" ? "还没有任何决定。" : "没有符合条件的决定。"}</p> : null}
+          {days?.map((d) => (
+            <Fragment key={d.date}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 2px 0", color: "var(--muted)", fontSize: 12 }}>
+                <span className="mono bold" style={{ color: "var(--text-2)" }}>{d.date.slice(5)} 周{d.weekday}</span>
+                <span>辩论 {d.debates} · 成交 {d.fills}</span>
+                <span style={{ flex: 1, borderTop: "1px solid #1f222b" }} />
+                {d.day_return != null ? <span className="mono" style={{ color: upColor(d.day_return) }}>{pct(d.day_return)}</span> : null}
+              </div>
+              {d.items.map(renderItem)}
+            </Fragment>
+          ))}
+          {days && days.length > 0 ? (() => {
+            const shown = days.reduce((n, d) => n + d.items.length, 0);
+            return (
+              <div className="inner stack" style={{ gap: 10 }}>
+                <div className="between">
+                  <span className="small muted">已看到 <b className="mono" style={{ color: "var(--text-2)" }}>{days[days.length - 1].date.slice(5)}</b> · 本赛季共 {total} 条决定</span>
+                  <span className="mono small muted">{shown} / {total}</span>
+                </div>
+                <div className="bar" role="progressbar" aria-label="已看到的决定" aria-valuemin={0} aria-valuemax={total} aria-valuenow={shown}>
+                  <div style={{ width: `${total ? Math.min(100, (shown / total) * 100) : 100}%`, background: "var(--gold)" }} />
+                </div>
+                {nextBefore ? (
+                  <button type="button" className="btn btn-ghost" style={{ alignSelf: "center" }} disabled={more} onClick={loadMore}>
+                    {more ? "加载中…" : "往前翻 5 个交易日"}
+                  </button>
+                ) : <span className="small faint" style={{ alignSelf: "center" }}>已经翻到开赛第一天</span>}
+              </div>
+            );
+          })() : null}
+        </section>
+      </div>
+      <p className="foot">仅限模拟交易，所有资金均为虚拟，不构成投资建议</p>
+    </main>
+  );
+
+  function renderItem(it: TimelineItem) {
             if (it.kind === "corporate") {
               const got = [Number(it.cash) > 0 ? `现金 ¥${Number(it.cash).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}` : "",
                 it.bonus_shares ? `送转 ${it.bonus_shares.toLocaleString("zh-CN")} 股（明天可卖）` : ""].filter(Boolean).join(" · ");
@@ -244,10 +310,5 @@ export default function PortfolioPage() {
                 ) : null}
               </article>
             );
-          })}
-        </section>
-      </div>
-      <p className="foot">仅限模拟交易，所有资金均为虚拟，不构成投资建议</p>
-    </main>
-  );
+  }
 }

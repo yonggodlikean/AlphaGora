@@ -1013,7 +1013,8 @@ class ArenaService:
             fd = body.get("final_decision") or {}
             self._blocked(str(fd.get("title") or "") + " " + str(fd.get("summary") or ""))
         res = await self.store.create_debate(portfolio_id, body["symbol"], body["rounds"], body["final_decision"],
-                                             body.get("execution_trace"), body.get("execution_trace_hash"))
+                                             body.get("execution_trace"), body.get("execution_trace_hash"),
+                                             created_at=self.now())       # market time (the simulated clock in demos)
         res["created_at"] = res["created_at"].isoformat()
         return res
 
@@ -1264,7 +1265,8 @@ class ArenaService:
                 d["sell_thesis"] = HIDDEN_TEXT
             conflicts.append(d)
         roast = await self.store.latest_events(self.season_id, "roast.daily", 1)
-        return {"conflicts": conflicts[:6], "roast": roast[0]["data"] if roast else None,
+        today = await self.store.conflicts_on(self.season_id, self.engine.trade_date or datetime.now(CST).date())
+        return {"conflicts": conflicts[:6], "conflicts_today": len(today[0]), "roast": roast[0]["data"] if roast else None,
                 "queues": self.queues(), "market": self.market_status(),
                 "season": {"slug": self.season["slug"], "name": self.season["name"],
                            "start": str(self.season["start_date"]), "end": str(self.season["end_date"]),
@@ -1349,8 +1351,32 @@ class ArenaService:
                         "trades": c["trades"]} for c in career],
         }
 
-    async def timeline(self, pid: str) -> list[dict]:
-        items = await self.store.timeline(pid)
+    async def timeline(self, pid: str, before: date | None = None, days: int = 5, kind: str = "all") -> dict:
+        """A team's decisions grouped by trading day, `days` at a time, newest first. `before` pages back;
+        kind: all | filled (something traded) | conflict (多空分歧)."""
+        day_list, more, total = await self.store.timeline_days(pid, before, days, kind)
+        if not day_list:
+            return {"days": [], "items": [], "next_before": None, "total": total}
+        items = await self._enrich_timeline(await self.store.timeline(pid, min(day_list), max(day_list)))
+        if kind == "filled":
+            items = [it for it in items if it["kind"] == "corporate" or any(o["filled_qty"] > 0 for o in it["orders"])]
+        elif kind == "conflict":
+            items = [it for it in items if it.get("has_conflict")]
+        fills = await self.store.day_fills(pid, day_list)
+        rets = await self.store.day_returns(pid, day_list)
+        if self.engine.day_open and self.engine.trade_date in day_list and pid in self.engine.accounts:
+            row = next((r for r in self.leaderboard("all") if r["portfolio_id"] == pid), None)
+            if row:
+                rets[self.engine.trade_date] = row["day_return"]
+        out = []
+        for d in day_list:
+            its = [it for it in items if it["day"] == d.isoformat()]
+            out.append({"date": d.isoformat(), "weekday": "一二三四五六日"[d.weekday()],
+                        "debates": sum(1 for it in its if it["kind"] == "debate"), "fills": fills.get(d, 0),
+                        "day_return": rets.get(d), "items": its})
+        return {"days": out, "items": items, "next_before": day_list[-1].isoformat() if more else None, "total": total}
+
+    async def _enrich_timeline(self, items: list[dict]) -> list[dict]:
         for it in items:
             it["symbol_name"] = self.names.get(it["symbol"], it["symbol"])
             live = [self.engine.order(o["order_id"]) for o in it["orders"]]
@@ -1367,14 +1393,43 @@ class ArenaService:
                 it["final_decision"] = {**it["final_decision"], "title": "（已隐藏）", "summary": HIDDEN_TEXT}
         return items
 
-    async def my_orders(self, pid: str) -> list[dict]:
-        rows = await self.store.recent_orders(pid, 30)
-        out = []
-        for r in rows:
+    async def my_orders(self, pid: str, scope: str = "today", before: date | None = None, days: int = 5) -> dict:
+        """scope=today: the current trading day, open orders first. scope=history: earlier days, `days` at a
+        time, grouped by trade date."""
+        today = self.engine.trade_date or datetime.now(CST).date()
+
+        def view(r) -> dict:
             live = self.engine.order(str(r["id"]))
-            view = live.public_view() if live else _row_view(r)
-            out.append(self._enrich(view) | {"created_at": r["created_at"].isoformat()})
-        return out
+            v = live.public_view() if live else _row_view(r)
+            return self._enrich(v) | {"created_at": r["created_at"].isoformat(), "trade_date": r["trade_date"].isoformat()}
+
+        if scope == "today":
+            rows = [view(r) for r in await self.store.orders_between(pid, today, today)]
+            rows.sort(key=lambda o: o["status"] not in ("new", "partially_filled"))   # still cancellable first
+            return {"orders": rows, "days": [], "next_before": None}
+        day_list, more = await self.store.order_days(pid, before or today, days)
+        if not day_list:
+            return {"orders": [], "days": [], "next_before": None}
+        rows = [view(r) for r in await self.store.orders_between(pid, min(day_list), max(day_list))]
+        return {"orders": rows,
+                "days": [{"date": d.isoformat(), "weekday": "一二三四五六日"[d.weekday()],
+                          "orders": [o for o in rows if o["trade_date"] == d.isoformat()]} for d in day_list],
+                "next_before": day_list[-1].isoformat() if more else None}
+
+    async def conflicts_on(self, day: date | None = None) -> dict:
+        day = day or self.engine.trade_date or datetime.now(CST).date()
+        cards, prev = await self.store.conflicts_on(self.season_id, day)
+        out = []
+        for d in cards:
+            if not (self.is_active(d.get("buyer_id", "")) and self.is_active(d.get("seller_id", ""))):
+                continue
+            if f"order:{d.get('buy_order_id')}" in self.hidden:
+                d["buy_thesis"] = HIDDEN_TEXT
+            if f"order:{d.get('sell_order_id')}" in self.hidden:
+                d["sell_thesis"] = HIDDEN_TEXT
+            out.append(d)
+        return {"date": day.isoformat(), "weekday": "一二三四五六日"[day.weekday()], "conflicts": out,
+                "prev": prev.isoformat() if prev else None}
 
 
 def _row_view(r: asyncpg.Record) -> dict:

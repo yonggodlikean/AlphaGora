@@ -1,14 +1,18 @@
-export const pct = (x: number, digits = 2) => `${x > 0 ? "+" : ""}${(x * 100).toFixed(digits)}%`;
-export const pctRaw = (x: number, digits = 2) => `${x > 0 ? "+" : ""}${x.toFixed(digits)}%`;
+/** Format a percent value with a sign, clamping magnitudes that round to zero
+ *  so we never render "-0.00%" (tiny negative floats) — zero has no sign. */
+const pctStr = (value: number, digits: number) => {
+  const rounded = Number(value.toFixed(digits));
+  const v = rounded === 0 ? 0 : value;
+  return `${v > 0 ? "+" : ""}${v.toFixed(digits)}%`;
+};
+/** Percentage from a fraction (0.0074 -> "+0.74%"), with the -0.00% guard. */
+export const pct = (x: number, digits = 2) => pctStr(x * 100, digits);
+/** Percentage from an already-percent value, with the same -0.00% guard. */
+export const pctRaw = (x: number, digits = 2) => pctStr(x, digits);
 /** Arrow only for a real direction; zero is neutral grey with no arrow. */
 export const arrow = (x: number) => (x > 0 ? "▲ " : x < 0 ? "▼ " : "");
 /** A-share convention: red = up, green = down. Zero renders neutral grey, never coloured. */
 export const upColor = (x: number) => (x > 0 ? "var(--up)" : x < 0 ? "var(--down)" : "var(--neutral)");
-/** Guard against "-0.00%" from tiny negative floats rounding to zero. */
-export const signed = (x: number, digits = 2) => {
-  const v = Math.abs(x) < 0.5 * Math.pow(10, -digits) ? 0 : x;
-  return `${v > 0 ? "+" : ""}${v.toFixed(digits)}`;
-};
 export const yuan = (s: string | number) =>
   Number(s).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 /** Prices keep per-instrument decimals: stocks 2, ETF/fund 3. */

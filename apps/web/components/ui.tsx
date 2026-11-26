@@ -44,7 +44,7 @@ export function Segmented<T extends string>({ value, onChange, options, size }: 
         return (
           <button key={o.value} role="tab" aria-selected={active} title={o.title} onClick={() => onChange(o.value)}
             style={{ appearance: "none", border: "none", cursor: "pointer", font: "inherit", fontWeight: 500, color: active ? "var(--text)" : "var(--muted)",
-              background: active ? "var(--accent-soft)" : "transparent", borderRadius: 4,
+              background: active ? "var(--accent-soft)" : "transparent", borderRadius: "var(--r-ctrl)",
               padding: size === "sm" ? "3px 10px" : "5px 14px", fontSize: size === "sm" ? "var(--fs-12)" : "var(--fs-13)",
               transition: "background var(--t-fast), color var(--t-fast)" }}>
             {o.label}

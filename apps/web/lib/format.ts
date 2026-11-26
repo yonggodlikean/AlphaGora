@@ -1,10 +1,19 @@
 export const pct = (x: number, digits = 2) => `${x > 0 ? "+" : ""}${(x * 100).toFixed(digits)}%`;
 export const pctRaw = (x: number, digits = 2) => `${x > 0 ? "+" : ""}${x.toFixed(digits)}%`;
-export const arrow = (x: number) => (x >= 0 ? "▲ " : "▼ ");
-/** A-share convention: red = up, green = down. Always paired with ▲▼ or a sign. */
-export const upColor = (x: number) => (x > 0 ? "var(--up)" : x < 0 ? "var(--down)" : "var(--text)");
+/** Arrow only for a real direction; zero is neutral grey with no arrow. */
+export const arrow = (x: number) => (x > 0 ? "▲ " : x < 0 ? "▼ " : "");
+/** A-share convention: red = up, green = down. Zero renders neutral grey, never coloured. */
+export const upColor = (x: number) => (x > 0 ? "var(--up)" : x < 0 ? "var(--down)" : "var(--neutral)");
+/** Guard against "-0.00%" from tiny negative floats rounding to zero. */
+export const signed = (x: number, digits = 2) => {
+  const v = Math.abs(x) < 0.5 * Math.pow(10, -digits) ? 0 : x;
+  return `${v > 0 ? "+" : ""}${v.toFixed(digits)}`;
+};
 export const yuan = (s: string | number) =>
   Number(s).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** Prices keep per-instrument decimals: stocks 2, ETF/fund 3. */
+export const price = (s: string | number, etf = false) =>
+  Number(s).toLocaleString("zh-CN", { minimumFractionDigits: etf ? 3 : 2, maximumFractionDigits: etf ? 3 : 2 });
 export const lots = (shares: number) => Math.floor(shares / 100).toLocaleString("zh-CN");
 export const int = (n: number) => n.toLocaleString("zh-CN");
 export const hhmm = (iso: string) => {
@@ -14,13 +23,14 @@ export const hhmm = (iso: string) => {
 export const mmdd = (iso: string) =>
   new Date(iso).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", timeZone: "Asia/Shanghai" });
 
-export const GROUP_TAG: Record<string, { label: string; cls: string }> = {
-  official_ai: { label: "官方 AI", cls: "tag-ai" },
-  community_ai: { label: "社区 AI", cls: "tag-hybrid" },
-  benchmark: { label: "基准", cls: "tag-bench" },
-  human: { label: "人类", cls: "tag-human" },
-  hybrid: { label: "人机混合", cls: "tag-hybrid" },
-  bot: { label: "外部 Bot", cls: "tag-bot" },
+/** One neutral camp tag: AI / human. The colour dot only separates the two camps. */
+export const CAMP_TAG: Record<string, { label: string; camp: "ai" | "human" | null }> = {
+  official_ai: { label: "AI", camp: "ai" },
+  community_ai: { label: "AI", camp: "ai" },
+  benchmark: { label: "基准", camp: null },
+  human: { label: "人类", camp: "human" },
+  hybrid: { label: "AI", camp: "ai" },
+  bot: { label: "Bot", camp: "ai" },
 };
 
 export const STANCE: Record<string, string> = { buy: "买入", sell: "卖出", hold: "观望" };

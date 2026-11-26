@@ -1028,13 +1028,38 @@ class ArenaService:
         self._last_bot_minute = minute
         if self.settings.market_feed != "redis":
             self._ensure_synthetic_history()
+        elif not self._books_ready():
+            return                       # just (re)started: wait until most symbols have today's quotes
         mv = MarketView(self.engine.trade_date, self.market_now, dict(self.engine.books), dict(self.day_open_px),
                         {k: list(v) for k, v in self.minute_closes.items()}, self.names, self.daily,
-                        self.held_days)
+                        self.held_days, self._pending_buys())
         for intent in self.bots.decide(mv, self.engine.accounts):
             await self._execute_intent(intent)
 
+    def _books_ready(self) -> bool:
+        """Bots decide on the whole market: after a restart mid-session, hold them until 90% of the universe has
+        quoted today (the gateway refreshes every symbol every ~3s)."""
+        universe = len(self.daily.bars) if self.daily else 0
+        today = self.engine.trade_date
+        fresh = sum(1 for b in self.engine.books.values()
+                    if not b.call_auction and self.calendar.trade_date_of(b.ts) == today)
+        return universe == 0 or fresh >= 0.9 * universe
+
+    def _pending_buys(self) -> dict[str, dict[str, str]]:
+        out: dict[str, dict[str, str]] = {}
+        for o in self.engine.open_orders():
+            if o.side is Side.BUY:
+                out.setdefault(o.portfolio_id, {})[o.symbol] = o.id
+        return out
+
     async def _execute_intent(self, it: Intent) -> None:
+        if it.cancel_order_id:
+            try:
+                await self.cancel_order(it.portfolio_id, it.cancel_order_id)
+                log.info("house cancel (%s %s): %s", self._name(it.portfolio_id), it.symbol, it.summary)
+            except OrderRejected as exc:
+                log.info("house cancel refused (%s %s): %s", self._name(it.portfolio_id), it.symbol, exc)
+            return
         body: dict[str, Any] = {"symbol": it.symbol, "side": it.side.value, "order_type": it.order_type.value,
                                 "qty": it.qty, "price": None if it.price is None else str(it.price),
                                 "idempotency_key": it.key}

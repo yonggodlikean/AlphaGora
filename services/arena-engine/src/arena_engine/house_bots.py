@@ -46,6 +46,7 @@ class Intent:
     summary: str
     rounds: list[dict] | None = None     # None -> plain thesis, no debate
     key: str = ""
+    cancel_order_id: str | None = None   # set: cancel this open order instead of placing one
 
 
 @dataclass
@@ -58,6 +59,7 @@ class MarketView:
     names: dict[str, str]
     history: History | None = None
     held_days: dict[tuple[str, str], int] = field(default_factory=dict)   # (portfolio, symbol) -> trading days held
+    pending_buys: dict[str, dict[str, str]] = field(default_factory=dict)  # portfolio -> {symbol: open buy order id}
 
 
 def _r(role: str, stance: str, argument: str) -> dict:
@@ -86,6 +88,7 @@ class HouseBots:
     _first_seal: dict[str, time] = field(default_factory=dict)
     _div_target: list[str] | None = None
     _div_info: dict[str, tuple[float, float]] = field(default_factory=dict)
+    _pending: dict[str, dict[str, str]] = field(default_factory=dict)
 
     # -------------------------------------------------------------- helpers
     def _reset(self, d: date) -> None:
@@ -128,8 +131,14 @@ class HouseBots:
         p = acct.positions.get(sym)
         return p.sellable_qty if p else 0
 
+    def _owned(self, acct: Account, sym: str) -> bool:
+        """Held, or already waiting on a buy order: never bought twice."""
+        p = acct.positions.get(sym)
+        return bool(p and p.qty) or sym in self._pending.get(acct.portfolio_id, {})
+
     @staticmethod
     def _holdings(acct: Account) -> int:
+        """Only filled positions count toward a team's cap; a queued bid may never fill."""
         return sum(1 for p in acct.positions.values() if p.qty)
 
     def _series(self, mv: MarketView, sym: str, b: L1Snapshot) -> list[float] | None:
@@ -156,6 +165,7 @@ class HouseBots:
     # -------------------------------------------------------------- entry point
     def decide(self, mv: MarketView, accounts: dict[str, Account]) -> list[Intent]:
         self._reset(mv.trade_date)
+        self._pending = {pid: dict(orders) for pid, orders in mv.pending_buys.items()}
         now = mv.now.astimezone(CST).time()
         for s, b in mv.books.items():              # when each board first sealed today (minute resolution)
             if b.limit_up_sealed and s not in self._first_seal:
@@ -170,6 +180,8 @@ class HouseBots:
             fn = getattr(self, f"_{tag}", None)
             if fn is not None:
                 intents = fn(pid, tag, acct, mv, now)
+                out += [it for it in intents if it.cancel_order_id]          # cancels are not rationed
+                intents = [it for it in intents if not it.cancel_order_id]
                 for it in intents[2:]:      # at most two actions per team per minute; the rest try next minute
                     self._acted.discard((tag, it.symbol, it.side.value))
                 for it in intents[:2]:
@@ -201,6 +213,8 @@ class HouseBots:
     def _dividend_conservative(self, pid: str, tag: str, acct: Account, mv: MarketView, now: time) -> list[Intent]:
         if self._div_target is None:
             rows = self._dividend_targets(mv)
+            if not rows:
+                return []                  # no quotes for the list yet: try again next minute, don't cache it
             self._div_target = [s for s, _, _ in rows]
             self._div_info = {s: (y, v) for s, y, v in rows}
         info, target = self._div_info, self._div_target
@@ -271,14 +285,20 @@ class HouseBots:
                    else f"今天没封住涨停（{_pct(self.chg(b))}），不连板就走。")
             out.append(Intent(pid, sym, Side.SELL, OrderType.LIMIT, n, b.bid1.price,
                               f"{self._name(mv, sym)}：不板就走", why, [_r("纪律", "sell", why)]))
+        holding = self._holdings(acct)
+        if holding >= 3:
+            # the cap is met with filled boards: stop queuing for more
+            for sym, oid in sorted(self._pending.get(pid, {}).items()):
+                if not (acct.positions.get(sym) and acct.positions[sym].qty):
+                    out.append(Intent(pid, sym, Side.BUY, OrderType.LIMIT, 0, None, f"{self._name(mv, sym)}：撤单",
+                                      "已经排到 3 个板，撤掉其余排队。", cancel_order_id=oid))
+            return out
         if now >= time(11, 0) or mv.history is None:
             return out
-        holding = self._holdings(acct)
         picks = []
         for b in self._candidates(mv):
             sym = b.symbol
-            if not b.limit_up_sealed or (tag, sym, "buy") in self._acted or (acct.positions.get(sym)
-                                                                             and acct.positions[sym].qty):
+            if not b.limit_up_sealed or (tag, sym, "buy") in self._acted or self._owned(acct, sym):
                 continue
             bars = mv.history.bars.get(sym)
             opened = mv.day_open.get(sym)
@@ -349,7 +369,7 @@ class HouseBots:
         for b in self._candidates(mv):
             sym = b.symbol
             if (b.limit_down_sealed or b.ask1 is None or (tag, sym, "buy") in self._acted
-                    or (acct.positions.get(sym) and acct.positions[sym].qty)):
+                    or self._owned(acct, sym)):
                 continue
             c = self._series(mv, sym, b)
             if c is None or len(c) < 201:
@@ -399,8 +419,7 @@ class HouseBots:
         picks = []
         for b in self._candidates(mv, mv.history.member_of("000300")):
             sym = b.symbol
-            if b.ask1 is None or (tag, sym, "buy") in self._acted or (acct.positions.get(sym)
-                                                                      and acct.positions[sym].qty):
+            if b.ask1 is None or (tag, sym, "buy") in self._acted or self._owned(acct, sym):
                 continue
             c = self._series(mv, sym, b)
             if c is None or len(c) < 22:
@@ -452,8 +471,7 @@ class HouseBots:
         picks = []
         for b in self._candidates(mv):
             sym = b.symbol
-            if b.ask1 is None or (tag, sym, "buy") in self._acted or (acct.positions.get(sym)
-                                                                      and acct.positions[sym].qty):
+            if b.ask1 is None or (tag, sym, "buy") in self._acted or self._owned(acct, sym):
                 continue
             c = self._series(mv, sym, b)
             if c is None or len(c) < 61:

@@ -110,6 +110,9 @@ services:
       OPENPUP_MODEL: ${OPENPUP_MODEL:-}
       OPENPUP_MINI_MODEL: ${OPENPUP_MINI_MODEL:-}
       OPENPUP_LLM_PROVIDER: ${OPENPUP_LLM_PROVIDER:-}
+      OPENPUP_EMBED_API_BASE: ${OPENPUP_EMBED_API_BASE:-}   # embeddings elsewhere when the chat relay has none
+      OPENPUP_EMBED_API_KEY: ${OPENPUP_EMBED_API_KEY:-}
+      OPENPUP_EMBED_MODEL: ${OPENPUP_EMBED_MODEL:-}
     volumes:
       - ${OPENPUP_ROOT:-/opt/openpup}:/opt/openpup:ro
       - pupdata:/data

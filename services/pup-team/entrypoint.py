@@ -4,6 +4,10 @@
 OpenPup 0.2.x ignores the LLM env overrides on an empty workspace, so the config file is (re)written here on
 every start from OPENPUP_API_KEY / OPENPUP_API_BASE / OPENPUP_MODEL / OPENPUP_MINI_MODEL / OPENPUP_LLM_PROVIDER.
 Only the [llm] and [app] settings live in it; the pups' memory database in the same volume is kept.
+
+Embeddings (memory search) go to the chat provider unless OPENPUP_EMBED_API_BASE / OPENPUP_EMBED_API_KEY /
+OPENPUP_EMBED_MODEL name another OpenAI-compatible endpoint, e.g. Cloudflare Workers AI with @cf/baai/bge-m3,
+for relays that serve chat only. OpenPup then gets two providers and routes the embedding slot to the second.
 """
 from __future__ import annotations
 
@@ -53,6 +57,43 @@ def main() -> None:
         f"api_key    = {toml_str(os.environ['OPENPUP_API_KEY'])}",
         f"api_base   = {toml_str(env('OPENPUP_API_BASE'))}",
         "",
+    ]
+    embed_base, embed_key = env("OPENPUP_EMBED_API_BASE"), env("OPENPUP_EMBED_API_KEY")
+    if embed_base and embed_key:
+        mini = env("OPENPUP_MINI_MODEL", model)
+        embed_model = env("OPENPUP_EMBED_MODEL", "@cf/baai/bge-m3")
+        lines.insert(lines.index("") , f"embed_model = {toml_str(embed_model)}")
+        lines += [
+            "[[llm.providers]]",
+            'id       = "chat"',
+            'name     = "chat"',
+            f"provider = {toml_str(env('OPENPUP_LLM_PROVIDER', 'openai'))}",
+            f"api_base = {toml_str(env('OPENPUP_API_BASE'))}",
+            f"api_key  = {toml_str(os.environ['OPENPUP_API_KEY'])}",
+            "enabled  = true",
+            f"models   = [{toml_str(model)}{', ' + toml_str(mini) if mini != model else ''}]",
+            "",
+            "[[llm.providers]]",
+            'id       = "embedding"',
+            'name     = "embedding"',
+            'provider = "openai_compatible"',
+            f"api_base = {toml_str(embed_base)}",
+            f"api_key  = {toml_str(embed_key)}",
+            "enabled  = true",
+            f"models   = [{toml_str(embed_model)}]",
+            "",
+            "[llm.routing.primary]",
+            'provider_id = "chat"',
+            f"model       = {toml_str(model)}",
+            "[llm.routing.mini]",
+            'provider_id = "chat"',
+            f"model       = {toml_str(mini)}",
+            "[llm.routing.embedding]",
+            'provider_id = "embedding"',
+            f"model       = {toml_str(embed_model)}",
+            "",
+        ]
+    lines += [
         "[app]",
         'execution_mode = "leashed"',
         'language       = "zh"',
@@ -61,7 +102,10 @@ def main() -> None:
     cfg = cfg_dir / "config.toml"
     cfg.write_text("\n".join(lines), encoding="utf-8")
     cfg.chmod(0o600)
-    print(f"pup-team: {version.stdout.strip()} · model {model} · arena {os.environ.get('AGORA_BASE_URL')}", flush=True)
+    embeds = f"embeddings {env('OPENPUP_EMBED_MODEL', '@cf/baai/bge-m3')} (own provider)" if embed_base and embed_key \
+        else "embeddings via the chat provider"
+    print(f"pup-team: {version.stdout.strip()} · model {model} · {embeds} · arena {os.environ.get('AGORA_BASE_URL')}",
+          flush=True)
     os.execvp(sys.executable, [sys.executable, "/app/runner/pup_team.py"])
 
 

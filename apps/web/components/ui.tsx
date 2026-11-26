@@ -26,38 +26,42 @@ export function Tag({ label, camp, title }: { label: string; camp?: "ai" | "huma
   return (
     <span className="tag" title={title}>
       {camp === "ai" && <span className="dot" style={{ background: "var(--accent)" }} />}
-      {camp === "human" && <span className="dot" style={{ background: "#c69a6b" }} />}
+      {camp === "human" && <span className="dot" style={{ background: "var(--text-2)" }} />}
       {label}
     </span>
   );
 }
 
 /** Segmented control with a sliding selection block. */
-export function Segmented<T extends string>({ options, value, onChange, ariaLabel }: {
-  options: { value: T; label: ReactNode }[];
-  value: T;
-  onChange: (v: T) => void;
-  ariaLabel?: string;
+export function Segmented<T extends string>({ value, onChange, options, size }: {
+  value: T; onChange: (v: T) => void; options: { value: T; label: ReactNode; title?: string }[]; size?: "sm" | "md";
 }) {
   return (
-    <div role="tablist" aria-label={ariaLabel} className="tabs" style={{ minHeight: 34, gap: 2, padding: 3 }}>
-      {options.map((o) => (
-        <button key={o.value} role="tab" aria-selected={o.value === value} className="tab" style={{ minHeight: 28, padding: "4px 12px", fontSize: "var(--fs-13)" }}
-          onClick={() => onChange(o.value)}>
-          {o.label}
-        </button>
-      ))}
+    <div role="tablist" aria-label="切换" className="segmented" data-size={size} style={{ display: "inline-flex", gap: 2, padding: 2,
+      borderRadius: "var(--r-ctrl)", background: "var(--panel-2)", border: "1px solid var(--line)" }}>
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button key={o.value} role="tab" aria-selected={active} title={o.title} onClick={() => onChange(o.value)}
+            style={{ appearance: "none", border: "none", cursor: "pointer", font: "inherit", fontWeight: 500, color: active ? "var(--text)" : "var(--muted)",
+              background: active ? "var(--accent-soft)" : "transparent", borderRadius: 4,
+              padding: size === "sm" ? "3px 10px" : "5px 14px", fontSize: size === "sm" ? "var(--fs-12)" : "var(--fs-13)",
+              transition: "background var(--t-fast), color var(--t-fast)" }}>
+            {o.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-/** Compact stat: label + tabular number in one row (replaces big metric cards). */
-export function Stat({ label, value, color, sub }: { label: ReactNode; value: ReactNode; color?: string; sub?: ReactNode }) {
+/** A big stat. Numbers stay proportional; labels and notes are secondary. */
+export function Stat({ label, value, note, color }: { label: ReactNode; value: ReactNode; note?: ReactNode; color?: string }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <span className="small muted">{label}</span>
-      <span className="num" style={{ fontSize: "var(--fs-16)", fontWeight: 600, color, fontVariantNumeric: "tabular-nums" }}>{value}</span>
-      {sub ? <span className="small faint">{sub}</span> : null}
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span className="section-label">{label}</span>
+      <span className="num" style={{ fontSize: "var(--fs-28)", fontWeight: 600, color, fontVariantNumeric: "tabular-nums" }}>{value}</span>
+      {note ? <span className="small muted" style={{ fontVariantNumeric: "tabular-nums" }}>{note}</span> : null}
     </div>
   );
 }

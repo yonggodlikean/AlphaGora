@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { GitHubIcon, LogoMark, REPO_URL } from "./Logo";
 
+/** Footer carries the tagline that the one-line nav dropped. */
 export function Footer() {
   return (
     <footer style={{ borderTop: "1px solid var(--line)", marginTop: 24 }}>

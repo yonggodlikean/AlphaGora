@@ -1,11 +1,11 @@
-/** Agora mark "打板 A": red legs form an A; the crossbar is the gold limit-up queue progress bar (排队中). */
+/** Agora mark "打板 A": red legs form an A; the crossbar is the limit-up queue progress bar. */
 export function LogoMark({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 120 120" aria-hidden="true">
-      <line x1="30" y1="104" x2="60" y2="20" stroke="#F0524B" strokeWidth="19" strokeLinecap="round" />
-      <line x1="90" y1="104" x2="60" y2="20" stroke="#F0524B" strokeWidth="19" strokeLinecap="round" />
-      <rect x="34" y="64" width="52" height="15" rx="7.5" fill="#262A33" />
-      <rect x="34" y="64" width="34" height="15" rx="7.5" fill="#F5C451" />
+      <line x1="30" y1="104" x2="60" y2="20" stroke="var(--up)" strokeWidth="19" strokeLinecap="round" />
+      <line x1="90" y1="104" x2="60" y2="20" stroke="var(--up)" strokeWidth="19" strokeLinecap="round" />
+      <rect x="34" y="64" width="52" height="15" rx="7.5" fill="rgba(255,255,255,0.12)" />
+      <rect x="34" y="64" width="34" height="15" rx="7.5" fill="var(--accent)" />
     </svg>
   );
 }

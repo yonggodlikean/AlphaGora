@@ -5,14 +5,13 @@ import type { CurveTrade } from "@/lib/api";
 const W = 1200;            // close to the card's real width, so text and strokes keep their size
 const H = 300;
 const PAD = { l: 10, r: 60, t: 12, b: 26 };
-const UP = "#ff6b63";
-const DOWN = "#3fcb8a";
 
 const day = (t: number) => new Date(t).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit" }).replace("/", "-");
 const hm = (t: number) => new Date(t).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false, hour: "2-digit", minute: "2-digit" });
 
 /** Return curve on a trading-time axis (nights and lunch breaks take no space): the team as a solid line, the
- *  CSI 300 benchmark dashed, buys and sells as dots. Values are basis points of return since the season start. */
+ *  CSI 300 benchmark dashed, buys and sells as dots. Values are basis points of return since the season start.
+ *  Colours come from design tokens through style props (SVG presentation attributes cannot read var()). */
 export function EquityChart({ series, benchmark, trades, daily, onPick }: {
   series: [number, number][]; benchmark: [number, number][]; trades: CurveTrade[]; daily: boolean;
   onPick: (item: string) => void;
@@ -52,31 +51,32 @@ export function EquityChart({ series, benchmark, trades, daily, onPick }: {
   }, [series, benchmark, trades, daily]);
 
   if (!geo) return <p className="empty">数据还不够，开盘后每 5 分钟会多一个点。</p>;
-  const color = geo.last >= 0 ? UP : DOWN;
+  const side = geo.last >= 0 ? "var(--up)" : "var(--down)";
   const h = hover !== null ? geo.marks[hover] : null;
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="收益曲线" style={{ display: "block" }}
       onMouseLeave={() => setHover(null)}>
       {geo.ticks.map((v, k) => (
         <g key={k}>
-          <line x1={PAD.l} x2={W - PAD.r} y1={geo.y(v)} y2={geo.y(v)} stroke="#1f222b" />
-          <text x={W - 4} y={geo.y(v) + 4} textAnchor="end" fill="#6f7684" fontSize={11} fontFamily="var(--mono)">
+          <line x1={PAD.l} x2={W - PAD.r} y1={geo.y(v)} y2={geo.y(v)} style={{ stroke: "var(--line-2)" }} />
+          <text x={W - 4} y={geo.y(v) + 4} textAnchor="end" style={{ fill: "var(--faint)", fontSize: 11, fontFamily: "var(--mono)" }}>
             {v > 0 ? "+" : ""}{(v / 100).toFixed(2)}%
           </text>
         </g>
       ))}
-      <line x1={PAD.l} x2={W - PAD.r} y1={geo.y(0)} y2={geo.y(0)} stroke="#3a3f4b" />
+      <line x1={PAD.l} x2={W - PAD.r} y1={geo.y(0)} y2={geo.y(0)} style={{ stroke: "var(--muted)", opacity: 0.55 }} />
       {geo.days.map((d, k) => (
         <g key={k}>
-          {k > 0 && !daily ? <line x1={d.x} x2={d.x} y1={PAD.t} y2={H - PAD.b} stroke="#262a33" strokeDasharray="3 4" /> : null}
-          <text x={d.x + 4} y={H - 8} fill="#6f7684" fontSize={11} fontFamily="var(--mono)">{d.label}</text>
+          {k > 0 && !daily ? <line x1={d.x} x2={d.x} y1={PAD.t} y2={H - PAD.b} style={{ stroke: "var(--line)" }} strokeDasharray="3 4" /> : null}
+          <text x={d.x + 4} y={H - 8} style={{ fill: "var(--faint)", fontSize: 11, fontFamily: "var(--mono)" }}>{d.label}</text>
         </g>
       ))}
-      {geo.bline ? <polyline points={geo.bline} fill="none" stroke="#9aa1ae" strokeWidth={1.5} strokeDasharray="5 4" /> : null}
-      <polyline points={geo.line} fill="none" stroke={color} strokeWidth={2.2} strokeLinejoin="round" />
+      {geo.bline ? <polyline points={geo.bline} fill="none" style={{ stroke: "var(--muted)" }} strokeWidth={1.5} strokeDasharray="5 4" /> : null}
+      <polyline points={geo.line} fill="none" style={{ stroke: side }} strokeWidth={2.2} strokeLinejoin="round" />
       {geo.marks.map((m, k) => (
-        <circle key={k} cx={m.x} cy={m.y} r={hover === k ? 7 : 5} fill={m.tr.side === "buy" ? UP : DOWN} stroke="#171920" strokeWidth={2}
-          style={{ cursor: "pointer" }} onMouseEnter={() => setHover(k)} onClick={() => onPick(m.tr.item)}>
+        <circle key={k} cx={m.x} cy={m.y} r={hover === k ? 7 : 5}
+          style={{ fill: m.tr.side === "buy" ? "var(--up)" : "var(--down)", stroke: "var(--panel-2)", cursor: "pointer" }} strokeWidth={2}
+          onMouseEnter={() => setHover(k)} onClick={() => onPick(m.tr.item)}>
           <title>{`${m.tr.side === "buy" ? "买入" : "卖出"} ${m.tr.name}`}</title>
         </circle>
       ))}
@@ -85,13 +85,13 @@ export function EquityChart({ series, benchmark, trades, daily, onPick }: {
         const thesis = (h.tr.thesis ?? "").slice(0, 22) + ((h.tr.thesis ?? "").length > 22 ? "…" : "");
         return (
           <g pointerEvents="none">
-            <line x1={h.x} x2={h.x} y1={PAD.t} y2={H - PAD.b} stroke="#5a4a22" />
-            <rect x={left} y={top} width={bw} height={64} rx={8} fill="#13151b" stroke="#5a4a22" />
-            <text x={left + 10} y={top + 20} fill="#e8eaf0" fontSize={12} fontWeight={700}>
+            <line x1={h.x} x2={h.x} y1={PAD.t} y2={H - PAD.b} style={{ stroke: "var(--accent-line)" }} />
+            <rect x={left} y={top} width={bw} height={64} rx={8} style={{ fill: "var(--panel)", stroke: "var(--accent-line)" }} />
+            <text x={left + 10} y={top + 20} style={{ fill: "var(--text)", fontSize: 12, fontWeight: 600 }}>
               {day(h.tr.t)} {hm(h.tr.t)} · {h.tr.side === "buy" ? "买入" : "卖出"} {h.tr.name}
             </text>
-            <text x={left + 10} y={top + 38} fill="#c3c8d2" fontSize={12}>{thesis || `${h.tr.qty} 股 @ ${h.tr.price}`}</text>
-            <text x={left + 10} y={top + 55} fill="#f5c451" fontSize={11}>点击 → 看这条决定</text>
+            <text x={left + 10} y={top + 38} style={{ fill: "var(--text-2)", fontSize: 12 }}>{thesis || `${h.tr.qty} 股 @ ${h.tr.price}`}</text>
+            <text x={left + 10} y={top + 55} style={{ fill: "var(--accent)", fontSize: 11 }}>点击 → 看这条决定</text>
           </g>
         );
       })() : null}

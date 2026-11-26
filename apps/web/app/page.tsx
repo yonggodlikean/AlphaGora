@@ -276,7 +276,7 @@ function BoardRowView({ r, period, sparks, mine }: { r: BoardRow; period: Period
         <span className={r.group === "human" ? "tag tag-human" : "tag tag-ai"}>{r.group === "human" ? "人类" : "AI"}</span>
       </td>
       <td className="hide-sm" style={{ padding: "10px 12px" }}>
-        <Sparkline data={s ?? []} color={upColor(r.day_return)} />
+        <Sparkline values={s ?? []} color={upColor(r.day_return)} />
       </td>
       <td style={{ padding: "10px 12px", textAlign: "right", color: upColor(ret) }}>
         {arrow(ret)}

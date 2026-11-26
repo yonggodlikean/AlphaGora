@@ -47,6 +47,7 @@ services:
       GATEWAY_INDICES: ${GATEWAY_INDICES:-000300,000016,000905,000852}   # CSI 300, SSE 50, CSI 500, CSI 1000 (~1,800)
       GATEWAY_SYMBOLS: ${GATEWAY_SYMBOLS:-510300.SH,510050.SH,512100.SH}   # extras: index ETFs (benchmark + breadth)
       GATEWAY_CONNECTIONS: ${GATEWAY_CONNECTIONS:-4}
+      TAPE_KEEP_DAYS: ${TAPE_KEEP_DAYS:-3}                         # gzip tapes: ~550 MB per day for ~1,800 names
       POLL_MS: ${GATEWAY_POLL_MS:-3000}
       TDX_SERVER: ${TDX_SERVER:-}
     volumes:

@@ -33,7 +33,8 @@ export default function ArenaPage() {
   const live = isLive(useMarket());
   usePoll(load, 10000, live);
   const [sparks, setSparks] = useState<Sparks | null>(null);
-  usePoll(() => { api<Sparks>("/api/v1/leaderboard/sparks").then(setSparks).catch(() => undefined); }, 300000, live);
+  const loadSparks = useCallback(() => { api<Sparks>("/api/v1/leaderboard/sparks").then(setSparks).catch(() => undefined); }, []);
+  usePoll(loadSparks, 300000, live);
 
   useEvents((e) => {
     if (e.type === "limit_up.queue") {

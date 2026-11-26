@@ -30,10 +30,17 @@ export function useEvents(onEvent: (e: ArenaEvent) => void) {
 }
 
 /** Runs `fn` now, again whenever the tab comes back into view, and every `ms` while `live` (the market is
- *  moving) and the tab is visible. Outside trading hours nothing changes, so nothing is polled. */
+ *  moving) and the tab is visible. Outside trading hours nothing changes, so nothing is polled.
+ *  `fn` must be stable (useCallback): when it changes (a new tab, filter or range was picked) it runs at once
+ *  instead of waiting for the next tick, which may never come outside trading hours. */
 export function usePoll(fn: () => void, ms: number, live = true) {
   const ref = useRef(fn);
   ref.current = fn;
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (mounted.current) fn();
+    mounted.current = true;
+  }, [fn]);
   useEffect(() => {
     ref.current();
     const onShow = () => { if (document.visibilityState === "visible") ref.current(); };

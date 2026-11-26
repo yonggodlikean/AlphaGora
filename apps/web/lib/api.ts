@@ -81,9 +81,13 @@ export type Driver = { kind: "rules" | "external"; name: string | null; online: 
 export type Group = "official_ai" | "community_ai" | "benchmark" | "human" | "hybrid" | "bot";
 export type BoardRow = {
   portfolio_id: string; name: string; group: Group; rank: number | null; cum_return: number;
-  excess_return: number; day_return: number; spark: number[]; equity: string; driver: Driver; cheers: number;
+  excess_return: number; day_return: number; equity: string; driver: Driver; cheers: number;
   month_return: number | null;
 };
+export type Sparks = { unit: "bps"; days: number; series: Record<string, number[]> };
+export type CurveRange = "today" | "5d" | "month" | "season";
+export type CurveTrade = { t: number; side: "buy" | "sell"; symbol: string; name: string; price: string; qty: number; thesis: string | null; item: string };
+export type Curve = { range: CurveRange; unit: "bps"; series: [number, number][]; benchmark: [number, number][]; trades: CurveTrade[] };
 export type SeasonInfo = { slug: string; name: string; start: string; end: string; status?: string; current?: boolean };
 export type Standing = { portfolio_id: string; name: string; rank: number | null; cum_return: number; excess_return: number;
   final_equity: string; trades: number; is_official: boolean; is_benchmark: boolean; controller_type: string };
@@ -100,7 +104,7 @@ export type OrderView = {
 };
 export type Feed = {
   conflicts: Conflict[]; roast: { trade_date: string; text: string; lines: Record<string, string> } | null;
-  conflicts_today?: number; queues: OrderView[]; market: Market; season: { slug: string; name: string; start: string; end: string; trading_days: number };
+  conflicts_today?: number; queues: OrderView[]; season: { slug: string; name: string; start: string; end: string; trading_days: number };
 };
 export type SymbolRow = {
   symbol: string; name: string; last: string; prev_close: string; chg_pct: number; upper_limit: string;

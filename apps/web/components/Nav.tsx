@@ -2,9 +2,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { api, type Market, type Phase } from "@/lib/api";
+import { type Market, type Phase } from "@/lib/api";
+import { subscribeMarket } from "@/lib/market";
 import { GitHubIcon, LogoMark, REPO_URL } from "./Logo";
-import { usePoll } from "@/lib/useEvents";
 
 const LINKS = [
   { href: "/", label: "擂台" },
@@ -20,24 +20,19 @@ const PHASE: Record<Phase, [string, string]> = {
 const DOT: Record<string, string> = { "pill-up": "#f0524b", "pill-gold": "#f5c451", "pill-gray": "#6f7684" };
 const fmtClock = (ms: number) => new Date(ms).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
 
-/** Status is polled every 5s; the clock ticks locally every second from the last server reading. */
-function useMarket() {
+/** Status comes from the shared 5s poll; the clock ticks locally every second from the last server reading. */
+function useMarketClock() {
   const [market, setMarket] = useState<Market | null>(null);
-  const failures = useRef(0);
   const anchor = useRef<{ server: number; local: number } | null>(null);
   const [clock, setClock] = useState("");
-  usePoll(() => {
-    api<Market>("/api/v1/market/status").then((m) => {
-      failures.current = 0;
+  useEffect(() => subscribeMarket((m) => {
+    if (m) {
       const server = m.now ? Date.parse(m.now) : NaN;
       anchor.current = !m.simulated && Number.isFinite(server) ? { server, local: performance.now() } : null;
       setClock(anchor.current ? fmtClock(server) : m.clock);
-      setMarket(m);
-    }).catch(() => {
-      failures.current += 1;
-      if (failures.current >= 3) setMarket(null);       // one dropped request should not flash "连接中"
-    });
-  }, 5000);
+    }
+    setMarket(m);
+  }), []);
   useEffect(() => {
     const id = setInterval(() => {
       const a = anchor.current;
@@ -50,7 +45,7 @@ function useMarket() {
 
 export function Nav() {
   const path = usePathname();
-  const { market, clock } = useMarket();
+  const { market, clock } = useMarketClock();
   const [base, pill] = market ? PHASE[market.phase ?? (market.trading ? "trading" : "closed")] ?? PHASE.closed : PHASE.closed;
   const label = market?.phase === "auction" ? `${base} · ${clock >= "09:20:00" ? "不可撤单" : "可撤单"}` : base;
 

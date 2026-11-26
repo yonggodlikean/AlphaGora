@@ -29,15 +29,16 @@ export function useEvents(onEvent: (e: ArenaEvent) => void) {
   }, []);
 }
 
-/** Polls `fn` every `ms` while the tab is visible. */
-export function usePoll(fn: () => void, ms: number) {
+/** Runs `fn` now, again whenever the tab comes back into view, and every `ms` while `live` (the market is
+ *  moving) and the tab is visible. Outside trading hours nothing changes, so nothing is polled. */
+export function usePoll(fn: () => void, ms: number, live = true) {
   const ref = useRef(fn);
   ref.current = fn;
   useEffect(() => {
     ref.current();
-    const id = setInterval(() => {
-      if (document.visibilityState === "visible") ref.current();
-    }, ms);
-    return () => clearInterval(id);
-  }, [ms]);
+    const onShow = () => { if (document.visibilityState === "visible") ref.current(); };
+    document.addEventListener("visibilitychange", onShow);
+    const id = live ? setInterval(() => { if (document.visibilityState === "visible") ref.current(); }, ms) : null;
+    return () => { document.removeEventListener("visibilitychange", onShow); if (id) clearInterval(id); };
+  }, [ms, live]);
 }

@@ -8,6 +8,7 @@ Agent (Authorization: Bearer <token>): GET /agent/state, /agent/orders; POST /ag
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import date
 import json
 import logging
@@ -20,7 +21,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ..config import Settings
@@ -206,16 +208,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/v1/arena/feed", tags=["擂台"], summary="首页动态：最新成交、冲突对决、吐槽")
-    async def feed(s: Svc):
-        return await s.arena_feed()
+    async def feed(s: Svc, request: Request):
+        return cached(request, await s.arena_feed())
 
     @app.get("/api/v1/leaderboard", tags=["擂台"], summary="排行榜")
-    async def leaderboard(s: Svc, group: Literal["all", "ai", "human"] = "all",
+    async def leaderboard(s: Svc, request: Request, group: Literal["all", "ai", "human"] = "all",
                           period: Literal["season", "month"] = "season"):
-        """period=month 按本月收益排名（从上月最后一个交易日收盘算起）。"""
-        return {"rows": s.leaderboard(group, period), "market": s.market_status(), "period": period,
-                "season": {"slug": s.season["slug"], "name": s.season["name"],
-                           "start": str(s.season["start_date"]), "end": str(s.season["end_date"])}}
+        """period=month 按本月收益排名（从上月最后一个交易日收盘算起）。走势图在 /leaderboard/sparks。"""
+        return cached(request, {"rows": s.leaderboard(group, period), "period": period,
+                                "season": {"slug": s.season["slug"], "name": s.season["name"],
+                                           "start": str(s.season["start_date"]), "end": str(s.season["end_date"])}})
+
+    @app.get("/api/v1/leaderboard/sparks", tags=["擂台"], summary="排行榜走势：各队近 5 个交易日的收益（基点）")
+    async def sparks(s: Svc, request: Request, days: int = Query(5, ge=1, le=10)):
+        """每 5 分钟一个点，抽样到约 60 个；单位是基点（1 = 0.01%）。数据每 5 分钟才变一次。"""
+        return cached(request, s.sparks(days))
+
+    @app.get("/api/v1/portfolios/{pid}/curve", tags=["擂台"], summary="战队收益曲线（对比沪深300），附买卖点")
+    async def curve(s: Svc, request: Request, pid: str, range: Literal["today", "5d", "month", "season"] = "5d"):  # noqa: A002
+        return cached(request, await s.curve_for(known(s, pid), range))
 
     @app.get("/api/v1/seasons", tags=["擂台"], summary="所有赛季")
     async def seasons(s: Svc):
@@ -353,6 +364,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await s.submit_debate(pid, body.model_dump())
 
     return app
+
+
+def cached(request: Request, data) -> Response:
+    """JSON with a weak ETag: when nothing changed the browser gets a bodyless 304 and reuses its copy
+    (Cache-Control: no-cache = store, but ask every time)."""
+    body = json.dumps(jsonable_encoder(data), ensure_ascii=False, separators=(",", ":")).encode()
+    tag = f'W/"{hashlib.sha1(body).hexdigest()[:20]}"'
+    headers = {"ETag": tag, "Cache-Control": "no-cache"}
+    seen = {t.strip().removeprefix("W/") for t in request.headers.get("if-none-match", "").split(",") if t.strip()}
+    if tag.removeprefix("W/") in seen:
+        return Response(status_code=304, headers=headers)
+    return Response(body, media_type="application/json", headers=headers)
 
 
 def client_ip(request: Request) -> str:

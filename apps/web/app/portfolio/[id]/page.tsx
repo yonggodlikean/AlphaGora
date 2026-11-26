@@ -4,7 +4,9 @@ import { useParams } from "next/navigation";
 import { Fragment, useCallback, useState } from "react";
 import { Avatar } from "@/components/Avatar";
 import { HeartIcon } from "@/components/Logo";
-import { api, type Profile, type TimelineDay, type TimelineItem, type TimelineKind, type TimelineOrder, type TimelinePage } from "@/lib/api";
+import { EquityChart } from "@/components/EquityChart";
+import { isLive, useMarket } from "@/lib/market";
+import { api, type Curve, type CurveRange, type Profile, type TimelineDay, type TimelineItem, type TimelineKind, type TimelineOrder, type TimelinePage } from "@/lib/api";
 import { driverLabel, GROUP_TAG, int, lots, mmdd, hhmm, pct, STANCE, upColor, yuan } from "@/lib/format";
 import { usePoll } from "@/lib/useEvents";
 
@@ -36,6 +38,7 @@ function outcome(orders: TimelineOrder[]): { kind: string; cls: string; text: st
   return { kind: o.status === "expired" ? "未成交" : "已撤单", cls: "pill-gray", text: `${side} ${lots(o.qty)} 手 · ${why}`, fees: "" };
 }
 
+const RANGES: [CurveRange, string][] = [["today", "今日"], ["5d", "5 日"], ["month", "本月"], ["season", "赛季"]];
 const KINDS: [TimelineKind, string][] = [["all", "全部"], ["filled", "有成交"], ["conflict", "多空分歧"]];
 
 export default function PortfolioPage() {
@@ -77,7 +80,23 @@ export default function PortfolioPage() {
       setOpen((o) => (Object.keys(o).length || !r.items[0] ? o : { [r.items[0].id]: true }));
     }).catch(() => undefined);
   }, [id, kind]);
-  usePoll(load, 10000);
+  const live = isLive(useMarket());
+  usePoll(load, 10000, live);
+  const [range, setRange] = useState<CurveRange>("5d");
+  const [curve, setCurve] = useState<Curve | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+  const loadCurve = useCallback(() => {
+    api<Curve>(`/api/v1/portfolios/${id}/curve?range=${range}`).then(setCurve).catch(() => undefined);
+  }, [id, range]);
+  usePoll(loadCurve, 60000, live && range !== "season");
+  function pick(item: string) {
+    const el = document.getElementById(`tl-${item}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setOpen((o) => ({ ...o, [item]: true }));
+    setFlash(item);
+    setTimeout(() => setFlash(null), 1600);
+  }
   const switchKind = (k: TimelineKind) => { setKind(k); setDays(null); setNextBefore(null); };
   async function loadMore() {
     if (!nextBefore) return;
@@ -157,6 +176,33 @@ export default function PortfolioPage() {
             <span className="small faint">{m.hint}</span>
           </div>
         ))}
+      </section>
+
+      <section className="card stack" aria-labelledby="curve-title" style={{ gap: 12 }}>
+        <div className="between">
+          <h2 id="curve-title">收益曲线</h2>
+          <div className="tabs" role="tablist" aria-label="时间范围">
+            {RANGES.map(([r, label]) => (
+              <button key={r} type="button" role="tab" className="tab" aria-selected={range === r} onClick={() => { setRange(r); setCurve(null); }}>{label}</button>
+            ))}
+          </div>
+        </div>
+        {curve && curve.series.length > 1 ? (() => {
+          const span = (pts: [number, number][]) => (pts.length > 1 ? (pts[pts.length - 1][1] - pts[0][1]) / 10000 : null);
+          const mine = span(curve.series), bench = span(curve.benchmark);
+          const label = RANGES.find(([r]) => r === range)?.[1] ?? "";
+          return (
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "var(--muted)" }}>
+              <span className="faint">{label === "赛季" ? "赛季累计" : `${label}变化`}</span>
+              <span><i style={{ display: "inline-block", width: 18, borderTop: `2px solid ${(mine ?? 0) >= 0 ? "#ff6b63" : "#3fcb8a"}`, verticalAlign: "middle", marginRight: 6 }} />{p.name}{mine != null ? <b className="mono" style={{ marginLeft: 6, color: upColor(mine) }}>{pct(mine)}</b> : null}</span>
+              {curve.benchmark.length > 1 ? <span><i style={{ display: "inline-block", width: 18, borderTop: "2px dashed #9aa1ae", verticalAlign: "middle", marginRight: 6 }} />沪深300 躺平{bench != null ? <b className="mono" style={{ marginLeft: 6, color: upColor(bench) }}>{pct(bench)}</b> : null}</span> : null}
+              <span><i style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: "#ff6b63", marginRight: 6 }} />买入</span>
+              <span><i style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: "#3fcb8a", marginRight: 6 }} />卖出</span>
+            </div>
+          );
+        })() : null}
+        {curve === null ? <p className="empty">加载中…</p>
+          : <EquityChart series={curve.series} benchmark={curve.benchmark} trades={curve.trades} daily={range === "season"} onPick={pick} />}
       </section>
 
       <div className="row">
@@ -254,7 +300,7 @@ export default function PortfolioPage() {
               const got = [Number(it.cash) > 0 ? `现金 ¥${Number(it.cash).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}` : "",
                 it.bonus_shares ? `送转 ${it.bonus_shares.toLocaleString("zh-CN")} 股（明天可卖）` : ""].filter(Boolean).join(" · ");
               return (
-                <article key={it.id} style={{ border: "1px solid var(--line)", borderRadius: 12, background: "var(--panel-2)", padding: "14px 16px" }} className="stack">
+                <article key={it.id} id={`tl-${it.id}`} style={{ border: "1px solid var(--line)", borderRadius: 12, background: "var(--panel-2)", padding: "14px 16px", scrollMarginTop: 80 }} className="stack">
                   <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
                     <span className="mono small muted">{mmdd(it.created_at)} {hhmm(it.created_at).slice(0, 5)}</span>
                     <span className="bold" style={{ fontSize: 15 }}>{it.symbol_name}：除权除息</span>
@@ -271,7 +317,7 @@ export default function PortfolioPage() {
             const summary = it.kind === "debate" ? it.final_decision?.summary : it.orders[0]?.thesis;
             const isOpen = !!open[it.id];
             return (
-              <article key={it.id} style={{ border: "1px solid var(--line)", borderRadius: 12, background: "var(--panel-2)", overflow: "hidden" }}>
+              <article key={it.id} id={`tl-${it.id}`} style={{ border: "1px solid var(--line)", borderRadius: 12, background: "var(--panel-2)", overflow: "hidden", scrollMarginTop: 80, outline: flash === it.id ? "2px solid var(--gold)" : undefined }}>
                 <div className="stack" style={{ padding: "14px 16px", gap: 8 }}>
                   <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
                     <span className="mono small muted">{mmdd(it.created_at)} {hhmm(it.created_at).slice(0, 5)}</span>

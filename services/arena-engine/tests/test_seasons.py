@@ -62,6 +62,8 @@ async def test_month_board_and_rollover(dsn):
     assert prof["career"][0]["rank"] is not None
     report = (await client.get(f"/api/v1/seasons/{old_slug}")).json()
     assert report["status"] == "settled" and report["standings"][0]["rank"] == 1
+    assert report["curves"] and report["recap"] and any(c["benchmark"] for c in report["curves"])
+    assert all(c["points"] for c in report["curves"])
     seasons = (await client.get("/api/v1/seasons")).json()["seasons"]
     assert [x["slug"] for x in seasons if x["current"]] == ["s1-2026w"]
     # official teams exist again in the new season and the board works

@@ -87,6 +87,8 @@ class ArenaService:
         self.daily: History | None = None          # daily bars for the strategies (gateway, or synthetic in demo)
         self._history_built: str | None = None
         self.held_days: dict[tuple[str, str], int] = {}
+        self.curve: dict[str, list[tuple[datetime, Decimal]]] = {}   # 5-minute equity, last ~7 days, per team
+        self._sample_bucket: tuple | None = None
         self.minute_closes: dict[str, list[Decimal]] = {}
         self._minute_of: dict[str, tuple[int, int]] = {}
         self.recent_fills: deque = deque(maxlen=1000)
@@ -177,6 +179,7 @@ class ArenaService:
             if await self.store.has_badge(pid, "first_trade"):
                 self._first_trade_done.add(pid)
         await self.refresh_held_days()
+        self.curve = await self.store.equity_points(list(self.meta), datetime.now(CST) - timedelta(days=10))
         log.info("season %s (%s → %s): %d teams", self.season["name"], self.season["start_date"],
                  self.season["end_date"], len(self.meta))
 
@@ -283,9 +286,42 @@ class ArenaService:
             for k in ("cum_return", "excess_return"):
                 s[k] = float(s[k])
             s["final_equity"] = str(s["final_equity"])
-        return {"slug": row["slug"], "name": row["name"], "start": str(row["start_date"]),
-                "end": str(row["end_date"]), "status": row["status"], "standings": standings,
-                "current": row["id"] == self.season_id}
+        out = {"slug": row["slug"], "name": row["name"], "start": str(row["start_date"]),
+               "end": str(row["end_date"]), "status": row["status"], "standings": standings,
+               "current": row["id"] == self.season_id}
+        if row["status"] != "settled":
+            return out
+        top = [s for s in standings if s["rank"] and s["rank"] <= 3]
+        bench = next((s for s in standings if s["is_benchmark"]), None)
+        shown = top + ([bench] if bench else [])
+        closes = await self.store.season_closes([s["portfolio_id"] for s in shown])
+        out["curves"] = [{"portfolio_id": s["portfolio_id"], "name": s["name"], "rank": s["rank"],
+                          "benchmark": s["is_benchmark"],
+                          "points": [[str(d), int(round(c * 10_000))] for d, c in closes.get(s["portfolio_id"], [])]}
+                         for s in shown]
+        best, worst = await self.store.season_trades_extremes(row["id"])
+
+        def trade(t):
+            if t is None:
+                return None
+            cost = t["notional"] - t["pnl"]
+            return {"team": t["team"], "portfolio_id": str(t["portfolio_id"]), "symbol": t["symbol"],
+                    "name": self.names.get(t["symbol"], t["symbol"]), "pnl": str(t["pnl"]),
+                    "pnl_pct": float(t["pnl"] / cost) if cost else None, "thesis": t["thesis"],
+                    "at": t["executed_at"].isoformat()}
+        out["best_trade"], out["worst_trade"] = trade(best), trade(worst)
+        stats = await self.store.season_team_stats(row["id"])
+        lines = []
+        for s in [x for x in standings if not x["is_benchmark"]][:6]:
+            st = stats.get(s["portfolio_id"], {})
+            bits = [f"成交 {st.get('fills', 0)} 笔"]
+            if st.get("queued"):
+                bits.append(f"排板 {st['queued']} 次" + (f"、炸板 {st['broken']} 次" if st.get("broken") else ""))
+            beat = s["excess_return"] > 0 and s["trades"] > 0
+            lines.append(f"{s['name']}：第 {s['rank']} 名，{s['cum_return'] * 100:+.2f}%，" + "，".join(bits)
+                         + ("，跑赢沪深300" if beat else "") + "。")
+        out["recap"] = lines
+        return out
 
     async def _load_portfolios(self) -> None:
         metas = await self.store.portfolios(self.season_id)
@@ -784,6 +820,7 @@ class ArenaService:
         d = self.engine.trade_date
         now = self.now() if not self.settings.is_simulated_clock else datetime.combine(d, time(15, 0, 1), CST)
         self._append_history_day(d)
+        await self._sample_equity(datetime.combine(d, time(15, 0), CST))     # the close, on the curve
         events = self.engine.end_trading_day(now)
         try:
             await self.store.save_marks(d, [(sym, json.dumps(snapshot_to_dict(b), ensure_ascii=False))
@@ -1018,7 +1055,100 @@ class ArenaService:
         res["created_at"] = res["created_at"].isoformat()
         return res
 
+    # ================================================================== return curves
+    async def maybe_sample_equity(self) -> None:
+        """Every team's equity at each 5-minute mark of continuous trading (09:30, 09:35 … 14:55; the close is
+        added by the close itself)."""
+        now = self.market_now
+        if not (self.engine.day_open and now and self.calendar.is_continuous_trading(now)):
+            return
+        local = now.astimezone(CST)
+        bucket = (local.date(), local.hour, local.minute // 5)
+        if bucket == self._sample_bucket or (self.settings.market_feed == "redis" and not self._books_ready()):
+            return
+        self._sample_bucket = bucket
+        await self._sample_equity(local.replace(minute=local.minute // 5 * 5, second=0, microsecond=0))
+
+    async def _sample_equity(self, ts: datetime) -> None:
+        rows = [(pid, money(self.equity(pid)[0])) for pid in self.meta
+                if pid in self.engine.accounts and self.status.get(pid, ("active",))[0] != "banned"]
+        await self.store.save_equity_points(ts, rows)
+        cutoff = ts - timedelta(days=10)
+        for pid, eq in rows:
+            pts = [p for p in self.curve.get(pid, []) if p[0] >= cutoff and p[0] != ts]
+            pts.append((ts, eq))
+            self.curve[pid] = pts
+
+    def _bps(self, pid: str, eq: Decimal) -> int:
+        initial = self.engine.accounts[pid].initial_cash
+        return int(round(float(eq / initial - 1) * 10_000))
+
+    @staticmethod
+    def _thin(points: list, limit: int) -> list:
+        if len(points) <= limit:
+            return points
+        step = len(points) / limit
+        return [points[int(i * step)] for i in range(limit - 1)] + [points[-1]]
+
+    def sparks(self, days: int = 5, points: int = 60) -> dict:
+        """Leaderboard sparklines: each team's return (basis points) over its last `days` trading days of
+        5-minute points, thinned to `points`, plus the live value while the market trades."""
+        live = self.engine.day_open and self.market_now is not None and \
+            self.calendar.is_continuous_trading(self.market_now)
+        series = {}
+        for pid in self.meta:
+            if pid not in self.engine.accounts:
+                continue
+            pts = self.curve.get(pid, [])
+            dates = sorted({t.astimezone(CST).date() for t, _ in pts})[-days:]
+            pts = [p for p in pts if p[0].astimezone(CST).date() in dates]
+            vals = [self._bps(pid, eq) for _, eq in self._thin(pts, points - 1)]
+            if live or not vals:
+                vals.append(self._bps(pid, self.equity(pid)[0]))
+            series[pid] = [0] + vals if len(vals) == 1 else vals
+        return {"unit": "bps", "days": days, "series": series}
+
+    async def curve_for(self, pid: str, rng: str) -> dict:
+        """One team's return curve and the benchmark's: today | 5d | month (5-minute points) or season
+        (daily closes), with the fills on it."""
+        now = self.now()                  # market time: the simulated clock in demos
+        today = (self.engine.trade_date or now.date())
+        bench = next((p for p, m in self.meta.items() if m.is_benchmark), None)
+        teams = [p for p in (pid, bench) if p]
+        out: dict[str, list] = {}
+        if rng == "season":
+            closes = await self.store.season_closes(teams)
+            for p in teams:
+                pts = [[int(datetime.combine(d, time(15, 0), CST).timestamp() * 1000), int(round(c * 10_000))]
+                       for d, c in closes.get(p, []) if d < today or not self.engine.day_open]
+                pts.append([int(now.timestamp() * 1000), self._bps(p, self.equity(p)[0])])
+                start = datetime.combine(self.season["start_date"], time(9, 0), CST)
+                out[p] = [[int(start.timestamp() * 1000), 0]] + pts
+            since = datetime.combine(self.season["start_date"], time(0), CST)
+        else:
+            if rng == "month":
+                since = datetime.combine(today.replace(day=1), time(0), CST)
+                pts_by = await self.store.equity_points(teams, since)
+            else:
+                pts_by = {p: self.curve.get(p, []) for p in teams}
+                dates = sorted({t.astimezone(CST).date() for p in teams for t, _ in pts_by[p]})
+                keep = set(dates[-(1 if rng == "today" else 5):])
+                pts_by = {p: [x for x in v if x[0].astimezone(CST).date() in keep] for p, v in pts_by.items()}
+                since = datetime.combine(min(keep), time(0), CST) if keep else datetime.combine(today, time(0), CST)
+            for p in teams:
+                pts = [[int(t.timestamp() * 1000), self._bps(p, eq)] for t, eq in self._thin(pts_by.get(p, []), 240)]
+                if self.engine.day_open:
+                    pts.append([int(now.timestamp() * 1000), self._bps(p, self.equity(p)[0])])
+                out[p] = pts
+        marks = await self.store.trade_marks(pid, since)
+        return {"range": rng, "unit": "bps", "series": out.get(pid, []), "benchmark": out.get(bench, []) if bench != pid else [],
+                "trades": [{"t": int(m["executed_at"].timestamp() * 1000), "side": m["side"], "symbol": m["symbol"],
+                            "name": self.names.get(m["symbol"], m["symbol"]), "price": str(m["price"]), "qty": m["qty"],
+                            "thesis": HIDDEN_TEXT if f"order:{m['order_id']}" in self.hidden else m["thesis"],
+                            "item": str(m["debate_id"] or m["order_id"])} for m in marks[-200:]]}
+
     async def maybe_run_bots(self) -> None:
+        await self.maybe_sample_equity()
         if not (self.settings.house_bots and self.bots and self.engine.day_open and self.market_now):
             return
         t = self.market_now.astimezone(CST)
@@ -1190,13 +1320,12 @@ class ArenaService:
             cum = float(eq / initial - 1)
             hist = [h for h in self.history.get(pid, []) if today is None or h["trade_date"] < today]
             prev = Decimal(hist[-1]["total_equity"]) if hist else initial
-            spark = [float(h["cum_return"]) for h in hist[-19:]] + [cum]
             month = self._period_return(pid, month_start, None, live=eq)
             rows.append({"portfolio_id": pid, "name": m.name, "group": g, "persona_tag": m.persona_tag,
                          "cum_return": cum, "excess_return": cum - bench, "day_return": float(eq / prev - 1),
                          "month_return": month,
                          "driver": self.driver(pid), "cheers": self.cheers.get(pid, 0),
-                         "equity": str(money(eq)), "spark": [0.0] + spark if len(spark) == 1 else spark})
+                         "equity": str(money(eq))})
         key = "month_return" if period == "month" else "cum_return"
         rows.sort(key=lambda r: r[key] if r[key] is not None else -1e9, reverse=True)
         place = 0
@@ -1292,7 +1421,7 @@ class ArenaService:
         roast = await self.store.latest_events(self.season_id, "roast.daily", 1)
         today = await self.store.conflicts_on(self.season_id, self.engine.trade_date or datetime.now(CST).date())
         return {"conflicts": conflicts[:6], "conflicts_today": len(today[0]), "roast": roast[0]["data"] if roast else None,
-                "queues": self.queues(), "market": self.market_status(),
+                "queues": self.queues(),
                 "season": {"slug": self.season["slug"], "name": self.season["name"],
                            "start": str(self.season["start_date"]), "end": str(self.season["end_date"]),
                            "trading_days": len({h["trade_date"] for hs in self.history.values() for h in hs})

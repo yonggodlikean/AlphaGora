@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { ConflictCard } from "@/components/ConflictCard";
 import { HeartIcon } from "@/components/Logo";
 import { Sparkline } from "@/components/Sparkline";
-import { api, getToken, type AgentState, type BoardRow, type Feed, type OrderView } from "@/lib/api";
+import { api, getToken, type AgentState, type BoardRow, type Feed, type OrderView, type Sparks } from "@/lib/api";
+import { isLive, useMarket } from "@/lib/market";
 import { arrow, driverLabel, GROUP_TAG, hhmm, int, lots, pct, upColor } from "@/lib/format";
 import { usePoll, useEvents } from "@/lib/useEvents";
 
@@ -29,7 +30,10 @@ export default function ArenaPage() {
     api<Feed>("/api/v1/arena/feed").then((f) => { setFeed(f); setError(null); }).catch((e) => setError(e.message));
     api<{ rows: BoardRow[] }>(`/api/v1/leaderboard?group=${tab}&period=${period}`).then((r) => setRows(r.rows)).catch(() => undefined);
   }, [tab, period]);
-  usePoll(load, 10000);
+  const live = isLive(useMarket());
+  usePoll(load, 10000, live);
+  const [sparks, setSparks] = useState<Sparks | null>(null);
+  usePoll(() => { api<Sparks>("/api/v1/leaderboard/sparks").then(setSparks).catch(() => undefined); }, 300000, live);
 
   useEvents((e) => {
     if (e.type === "limit_up.queue") {
@@ -98,10 +102,10 @@ export default function ArenaPage() {
         <div className="scroll-x">
           <div className="board-min">
             <div className="board-head">
-              <span>名次</span><span>战队</span><span className="col-spark">走势</span><span className="r">{period === "month" ? "本月收益" : "赛季收益"}</span><span className="r col-excess">比沪深300</span><span className="r col-day">今日</span>
+              <span>名次</span><span>战队</span><span className="col-spark">近 5 日</span><span className="r">{period === "month" ? "本月收益" : "赛季收益"}</span><span className="r col-excess">比沪深300</span><span className="r col-day">今日</span>
             </div>
             {rows === null ? <p className="empty">加载中…</p> : null}
-            {rows?.map((r) => <BoardLine key={r.portfolio_id} r={r} period={period} mine={r.portfolio_id === me} />)}
+            {rows?.map((r) => <BoardLine key={r.portfolio_id} r={r} period={period} mine={r.portfolio_id === me} spark={sparks?.series[r.portfolio_id]} />)}
           </div>
         </div>
       </section>
@@ -131,7 +135,7 @@ function QueueCard({ q }: { q: OrderView }) {
   );
 }
 
-function BoardLine({ r, period, mine }: { r: BoardRow; period: Period; mine: boolean }) {
+function BoardLine({ r, period, mine, spark }: { r: BoardRow; period: Period; mine: boolean; spark?: number[] }) {
   const tag = GROUP_TAG[r.group];
   const bench = r.group === "benchmark";
   const ret = period === "month" ? r.month_return ?? 0 : r.cum_return;
@@ -153,7 +157,9 @@ function BoardLine({ r, period, mine }: { r: BoardRow; period: Period; mine: boo
           ) : null;
         })()}
       </span>
-      <span className="col-spark"><Sparkline values={r.spark} color={bench ? "#9aa1ae" : r.cum_return >= 0 ? "#ff6b63" : "#3fcb8a"} dashed={bench} /></span>
+      <span className="col-spark">{spark && spark.length > 1
+        ? <Sparkline values={spark} color={bench ? "#9aa1ae" : spark[spark.length - 1] >= 0 ? "#ff6b63" : "#3fcb8a"} dashed={bench} />
+        : null}</span>
       <span className="r mono bold" style={{ fontSize: 15, color: bench ? "var(--muted)" : upColor(ret) }}>{pct(ret)}</span>
       <span className="r mono col-excess" style={{ color: bench ? "var(--muted)" : upColor(r.excess_return) }}>{bench ? "—" : pct(r.excess_return)}</span>
       <span className="r mono col-day" style={{ color: upColor(r.day_return) }}>{arrow(r.day_return)}{pct(r.day_return)}</span>

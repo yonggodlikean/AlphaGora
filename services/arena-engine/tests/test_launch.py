@@ -171,3 +171,30 @@ async def test_timeline_orders_and_conflicts_page_by_trading_day(dsn):
     hist = (await client.get("/api/v1/agent/orders", headers=auth, params={"scope": "history"})).json()
     assert today["orders"] == [] and hist == {"orders": [], "days": [], "next_before": None}
     await client.aclose(); await service.stop(); await pool.close()
+
+
+@pytest.mark.anyio
+async def test_equity_curve_sparks_and_etag(dsn):
+    service, client, pool = await boot(dsn)
+    await play(service, DemoMarket(seed=11).day(DAY1))
+    await service.close_day()
+    async with pool.acquire() as conn:
+        n = await conn.fetchval("SELECT count(DISTINCT ts) FROM equity_points")
+    assert n >= 40                                     # every 5 minutes of continuous trading, plus the close
+    sparks = (await client.get("/api/v1/leaderboard/sparks")).json()
+    board = (await client.get("/api/v1/leaderboard")).json()
+    assert sparks["unit"] == "bps" and "spark" not in board["rows"][0] and "market" not in board
+    dog = next(r for r in board["rows"] if r["name"] == "激进打板动量狗")
+    line = sparks["series"][dog["portfolio_id"]]
+    assert 20 <= len(line) <= 60 and line[-1] == round(dog["cum_return"] * 10_000)
+    for rng in ("today", "5d", "month", "season"):
+        c = (await client.get(f"/api/v1/portfolios/{dog['portfolio_id']}/curve", params={"range": rng})).json()
+        assert c["series"] and c["benchmark"], rng
+    today = (await client.get(f"/api/v1/portfolios/{dog['portfolio_id']}/curve", params={"range": "today"})).json()
+    assert today["trades"] and {"t", "side", "name", "thesis", "item"} <= set(today["trades"][0])
+    # unchanged data: the second request gets a bodyless 304
+    r1 = await client.get("/api/v1/leaderboard")
+    r2 = await client.get("/api/v1/leaderboard", headers={"If-None-Match": r1.headers["etag"]})
+    assert r1.status_code == 200 and r2.status_code == 304 and r2.content == b""
+    assert r1.headers["cache-control"] == "no-cache"
+    await client.aclose(); await service.stop(); await pool.close()

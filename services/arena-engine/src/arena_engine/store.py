@@ -136,6 +136,62 @@ class Store:
             "ORDER BY r.rank NULLS LAST", season_id)
         return [dict(r) for r in rows]
 
+    async def save_equity_points(self, ts: datetime, rows: list[tuple[str, Decimal]]) -> None:
+        await self.pool.executemany(
+            "INSERT INTO equity_points (portfolio_id, ts, equity) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            [(uuid.UUID(pid), ts, eq) for pid, eq in rows])
+
+    async def equity_points(self, portfolio_ids: list[str], since: datetime) -> dict[str, list[tuple[datetime, Decimal]]]:
+        rows = await self.pool.fetch(
+            "SELECT portfolio_id, ts, equity FROM equity_points WHERE portfolio_id = ANY($1::uuid[]) AND ts >= $2 "
+            "ORDER BY ts", [uuid.UUID(p) for p in portfolio_ids], since)
+        out: dict[str, list[tuple[datetime, Decimal]]] = {}
+        for r in rows:
+            out.setdefault(str(r["portfolio_id"]), []).append((r["ts"], r["equity"]))
+        return out
+
+    async def season_closes(self, portfolio_ids: list[str]) -> dict[str, list[tuple[date, float]]]:
+        rows = await self.pool.fetch(
+            "SELECT portfolio_id, trade_date, cum_return FROM daily_snapshots WHERE portfolio_id = ANY($1::uuid[]) "
+            "ORDER BY trade_date", [uuid.UUID(p) for p in portfolio_ids])
+        out: dict[str, list[tuple[date, float]]] = {}
+        for r in rows:
+            out.setdefault(str(r["portfolio_id"]), []).append((r["trade_date"], float(r["cum_return"])))
+        return out
+
+    async def trade_marks(self, portfolio_id: str, since: datetime) -> list[dict]:
+        """Fills since `since` with what the team said when it placed the order, for markers on the curve."""
+        rows = await self.pool.fetch(
+            """SELECT t.executed_at, t.side::text AS side, t.symbol, t.price, t.qty, o.id AS order_id, o.debate_id,
+                      COALESCE(o.thesis, d.final_decision->>'summary', d.final_decision->>'title') AS thesis
+               FROM trades t JOIN orders o ON o.id = t.order_id LEFT JOIN debates d ON d.id = o.debate_id
+               WHERE t.portfolio_id = $1 AND t.executed_at >= $2 ORDER BY t.executed_at""",
+            uuid.UUID(portfolio_id), since)
+        return [dict(r) for r in rows]
+
+    async def season_trades_extremes(self, season_id: uuid.UUID) -> tuple[dict | None, dict | None]:
+        """The season's best and worst closed trade by realized P&L (a sell fill against its cost)."""
+        q = """SELECT t.id, t.symbol, t.price, t.qty, t.notional, t.executed_at, p.name AS team, p.id AS portfolio_id,
+                      -e.amount AS pnl, COALESCE(o.thesis, d.final_decision->>'summary') AS thesis
+               FROM trades t JOIN portfolios p ON p.id = t.portfolio_id
+               JOIN ledger_journals j ON j.ref_type = 'trade' AND j.ref_id = t.id AND j.entry_type = 'sell_fill'
+               JOIN ledger_entries e ON e.journal_id = j.id AND e.account = 'realized_pnl'
+               JOIN orders o ON o.id = t.order_id LEFT JOIN debates d ON d.id = o.debate_id
+               WHERE p.season_id = $1 AND NOT p.is_benchmark AND p.status <> 'banned'
+               ORDER BY -e.amount {} LIMIT 1"""
+        best = await self.pool.fetchrow(q.format("DESC"), season_id)
+        worst = await self.pool.fetchrow(q.format("ASC"), season_id)
+        return (dict(best) if best and best["pnl"] > 0 else None, dict(worst) if worst and worst["pnl"] < 0 else None)
+
+    async def season_team_stats(self, season_id: uuid.UUID) -> dict[str, dict]:
+        rows = await self.pool.fetch(
+            """SELECT p.id, count(DISTINCT t.id) AS fills,
+                      count(DISTINCT o.id) FILTER (WHERE o.queue_initial IS NOT NULL AND o.side = 'buy') AS queued,
+                      count(DISTINCT t.id) FILTER (WHERE t.liquidity = 'board_break') AS broken
+               FROM portfolios p LEFT JOIN orders o ON o.portfolio_id = p.id LEFT JOIN trades t ON t.portfolio_id = p.id
+               WHERE p.season_id = $1 GROUP BY p.id""", season_id)
+        return {str(r["id"]): {"fills": r["fills"], "queued": r["queued"], "broken": r["broken"]} for r in rows}
+
     async def badge_ref_exists(self, code: str, ref: uuid.UUID) -> bool:
         return bool(await self.pool.fetchval(
             "SELECT 1 FROM portfolio_badges WHERE badge_code = $1 AND ref_id = $2 LIMIT 1", code, ref))
